@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QSize, QEvent, QObject, QPointF
 from PySide6.QtGui import (
-    QFont as QFontGui, QColor, QAction, QPixmap, QPainter, QPolygonF,
+    QFont as QFontGui, QColor, QAction, QPixmap, QPainter, QPolygonF, QIcon,
 )
 
 
@@ -73,9 +73,9 @@ SETTINGS_APP     = "MacroSuite"
 SETTINGS_LAST_DB = "last_database_path"
 
 # ── Calorie text colors (light, comfortable on dark background) ──
-CAL_TEXT_GREEN  = QColor(125, 205, 145)
-CAL_TEXT_YELLOW = QColor(215, 200, 95)
-CAL_TEXT_ORANGE = QColor(215, 140, 90)
+CAL_TEXT_GREEN  = QColor(110, 210, 140)   # 0–149 kcal
+CAL_TEXT_YELLOW = QColor(240, 220, 80)   # 150–399 kcal
+CAL_TEXT_ORANGE = QColor(230, 140, 80)   # ≥400 kcal
 
 # ── Theme colors ──
 C_BG        = "#1c1c1e"
@@ -361,11 +361,63 @@ class DatabaseManager:
     MEALS_SHEET       = "Meals"
     MENUS_SHEET       = "Menues"
 
+    # Header keywords → internal field names (case-insensitive matching)
+    _NUTRITION_DETECT = {
+        "kcal":    "energy_kcal",
+        "kj":      "energy_kj",
+    }
+    # Order matters: "saturated" must be checked before generic "fat"
+    _NUTRITION_DETECT_ORDERED = [
+        ("saturated", "saturated_fat"),
+        ("carbohydrate", "carbohydrate"),
+        ("sugar",    "sugars"),
+        ("fibre",    "fibre"),
+        ("fiber",    "fibre"),
+        ("protein",  "protein"),
+        ("salt",     "salt"),
+        ("fat",      "fat"),  # must be AFTER "saturated"
+    ]
+
     def __init__(self, path: str):
         self.path = Path(path)
         backup = self.path.parent / f"{self.path.stem}_backup{self.path.suffix}"
         if not backup.exists():
             shutil.copy2(self.path, backup)
+        # Column index mapping — detected from headers on first load
+        self._col_map: Dict[str, int] = {}  # field_name → 0-based column index
+        self._max_col: int = 16
+
+    def _detect_columns(self, header_row):
+        """Detect which column index holds which nutrition field, from header text."""
+        self._col_map = {}
+        self._max_col = len(header_row)
+        for idx, h in enumerate(header_row):
+            if h is None:
+                continue
+            hl = str(h).lower()
+            # Check kcal/kJ first (unique keywords)
+            for keyword, field in self._NUTRITION_DETECT.items():
+                if keyword in hl and field not in self._col_map:
+                    self._col_map[field] = idx
+                    break
+            else:
+                # Check ordered keywords
+                for keyword, field in self._NUTRITION_DETECT_ORDERED:
+                    if keyword in hl and field not in self._col_map:
+                        self._col_map[field] = idx
+                        break
+
+        # Fallback: if we found fewer than 5 fields, use standard 16-col positions
+        if len(self._col_map) < 5:
+            self._col_map = {
+                "energy_kj": 6, "energy_kcal": 7, "fat": 8,
+                "saturated_fat": 9, "carbohydrate": 10, "sugars": 11,
+                "fibre": 12, "protein": 13, "salt": 14,
+            }
+
+    def _get_col(self, field: str) -> int:
+        """Get 0-based column index for a field, or -1 if not found."""
+        return self._col_map.get(field, -1)
 
     # ── Read headers exactly from database ──
 
@@ -385,26 +437,39 @@ class DatabaseManager:
     def load_ingredients(self) -> Dict[int, Ingredient]:
         wb = openpyxl.load_workbook(self.path, data_only=True, read_only=True)
         ws = wb[self.INGREDIENTS_SHEET]
+
+        # Read header row and detect column positions
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        self._detect_columns(header_row)
+        self._max_col = len(header_row)
+
         result = {}
-        for row in ws.iter_rows(min_row=2, max_col=16, values_only=True):
-            rid, name = row[0], row[2]
+        for row in ws.iter_rows(min_row=2, max_col=self._max_col, values_only=True):
+            rid, name = row[0], row[2] if len(row) > 2 else None
             if rid is None or not name:
                 continue
-            # Read EXACTLY by position — G(6)=kJ, H(7)=kcal as in database
+
+            def _val(field):
+                """Safely get a value from the row at the detected column."""
+                idx = self._col_map.get(field, -1)
+                if 0 <= idx < len(row):
+                    return row[idx]
+                return None
+
             result[int(rid)] = Ingredient(
                 id=int(rid), name=str(name).strip(),
-                brand=str(row[3] or "").strip(),
-                product_name=str(row[4] or "").strip(),
-                energy_kj=_f(row[6]),     # col G — exactly as in database
-                energy_kcal=_f(row[7]),   # col H — exactly as in database
-                fat=_f(row[8]),
-                saturated_fat=_f(row[9]),
-                carbohydrate=_f(row[10]),
-                sugars=_f(row[11]),
-                fibre=_f(row[12]),
-                protein=_f(row[13]),
-                salt=_f(row[14]),
-                package_size=str(row[15] or "").strip(),
+                brand=str(row[3] or "").strip() if len(row) > 3 else "",
+                product_name=str(row[4] or "").strip() if len(row) > 4 else "",
+                energy_kj=_f(_val("energy_kj")),
+                energy_kcal=_f(_val("energy_kcal")),
+                fat=_f(_val("fat")),
+                saturated_fat=_f(_val("saturated_fat")),
+                carbohydrate=_f(_val("carbohydrate")),
+                sugars=_f(_val("sugars")),
+                fibre=_f(_val("fibre")),
+                protein=_f(_val("protein")),
+                salt=_f(_val("salt")),
+                package_size=str(row[self._max_col - 1] or "").strip() if self._max_col > 15 and len(row) > self._max_col - 1 else "",
             )
         wb.close()
         return result
@@ -519,10 +584,13 @@ class DatabaseManager:
             self._safe_write(ws, r, 4, ing.brand or None)
             self._safe_write(ws, r, 5, ing.product_name or None)
             self._safe_write(ws, r, 6, "per 100 g")
-            for c, key in enumerate(EXCEL_COL_ORDER):
-                val = getattr(ing, key)
-                self._safe_write(ws, r, EXCEL_NUTRITION_START_COL + c, val if val else None)
-            self._safe_write(ws, r, 16, ing.package_size or None)
+            # Write nutrition to DETECTED column positions (1-based)
+            for field in NUTRITION_KEYS:
+                col_idx = self._get_col(field)
+                if col_idx >= 0:
+                    val = getattr(ing, field)
+                    self._safe_write(ws, r, col_idx + 1, val if val else None)
+            self._safe_write(ws, r, self._max_col, ing.package_size or None)
 
         for old_id, old_row in id_to_row.items():
             if old_id not in written_ids:
@@ -552,7 +620,7 @@ class DatabaseManager:
                 ws2.cell(r, 4).value = mi.amount_grams
                 if ing:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
-                    for c, key in enumerate(EXCEL_COL_ORDER):
+                    for c, key in enumerate(NUTRITION_KEYS):
                         ws2.cell(r, 5 + c).value = nutr[key]
                 for c in range(1, 5 + len(NUTRITION_KEYS)):
                     self._copy_style_to(ws2, r, c, data_style)
@@ -965,7 +1033,8 @@ class IngredientsTab(QWidget):
     def __init__(self):
         super().__init__()
         self.ingredients: Dict[int, Ingredient] = {}
-        self.db_headers: List[str] = []  # headers read from database
+        self.db_headers: List[str] = []
+        self._col_map: Dict[str, int] = {}  # field → 0-based column index
         self._build()
 
     def _build(self):
@@ -991,15 +1060,35 @@ class IngredientsTab(QWidget):
         self.table.setSortingEnabled(True)
         self.table.doubleClicked.connect(self._edit)
         lay.addWidget(self.table)
+
+        # ── Calorie color legend ──
+        legend = QHBoxLayout()
+        legend.addStretch()
+        for color, label in [
+            (CAL_TEXT_GREEN,  "● 0–149 kcal (Low)"),
+            (CAL_TEXT_YELLOW, "● 150–399 kcal (Medium)"),
+            (CAL_TEXT_ORANGE, "● ≥ 400 kcal (High)"),
+        ]:
+            lbl = QLabel(label)
+            lbl.setStyleSheet(
+                f"color: rgb({color.red()},{color.green()},{color.blue()});"
+                f"font-size: 11px; font-weight: 600; padding: 2px 12px; background: transparent;"
+            )
+            legend.addWidget(lbl)
+        legend.addStretch()
+        lay.addLayout(legend)
+
         btns = QHBoxLayout(); btns.addStretch()
         eb = QPushButton("Edit"); eb.setProperty("class", "secondary"); eb.clicked.connect(self._edit)
         db = QPushButton("Delete"); db.setProperty("class", "danger"); db.clicked.connect(self._delete)
         btns.addWidget(eb); btns.addWidget(db)
         lay.addLayout(btns)
 
-    def set_headers(self, headers: List[str]):
+    def set_headers(self, headers: List[str], col_map: Dict[str, int] = None):
         """Set column headers exactly as read from the database."""
         self.db_headers = headers
+        if col_map:
+            self._col_map = col_map
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
@@ -1011,20 +1100,34 @@ class IngredientsTab(QWidget):
         self.table.setSortingEnabled(False)
         items = [i for i in self.ingredients.values()
                  if not ft or ft in i.name.lower() or ft in i.brand.lower()]
+        n_cols = len(self.db_headers) if self.db_headers else 16
+
+        # Use detected col_map, or fallback to standard positions
+        cm = self._col_map if self._col_map else {
+            "energy_kj": 6, "energy_kcal": 7, "fat": 8,
+            "saturated_fat": 9, "carbohydrate": 10, "sugars": 11,
+            "fibre": 12, "protein": 13, "salt": 14,
+        }
+
         self.table.setRowCount(len(items))
         for r, ing in enumerate(sorted(items, key=lambda x: x.name.lower())):
-            # Write ALL 16 columns exactly matching database column positions
-            self.table.setItem(r, 0, _num_item(ing.id))                          # A: ID
-            self.table.setItem(r, 1, QTableWidgetItem(""))                       # B: human verified (display only)
-            self.table.setItem(r, 2, QTableWidgetItem(ing.name))                 # C: Name
-            self.table.setItem(r, 3, QTableWidgetItem(ing.brand))                # D: Brand
-            self.table.setItem(r, 4, QTableWidgetItem(ing.product_name))         # E: Product
-            self.table.setItem(r, 5, QTableWidgetItem("per 100 g"))              # F: Basis
-            # G–O: nutrition in database column order
-            for c, key in enumerate(EXCEL_COL_ORDER):
-                self.table.setItem(r, 6 + c, _num_item(getattr(ing, key)))
-            self.table.setItem(r, 15, QTableWidgetItem(ing.package_size))        # P: Package Size
-            # Apply calorie color
+            # Fill all columns with empty items first
+            for c in range(n_cols):
+                self.table.setItem(r, c, QTableWidgetItem(""))
+            # Fixed columns
+            self.table.setItem(r, 0, _num_item(ing.id))
+            self.table.setItem(r, 2, QTableWidgetItem(ing.name))
+            self.table.setItem(r, 3, QTableWidgetItem(ing.brand))
+            self.table.setItem(r, 4, QTableWidgetItem(ing.product_name))
+            self.table.setItem(r, 5, QTableWidgetItem("per 100 g"))
+            if n_cols > 15:
+                self.table.setItem(r, n_cols - 1, QTableWidgetItem(ing.package_size))
+            # Nutrition at detected column positions
+            for field in NUTRITION_KEYS:
+                col = cm.get(field, -1)
+                if 0 <= col < n_cols:
+                    self.table.setItem(r, col, _num_item(getattr(ing, field)))
+            # Calorie color
             _color_row_text(self.table, r, _calorie_text_color(ing.energy_kcal))
         self.table.resizeColumnsToContents()
         self.table.setSortingEnabled(True)
@@ -1466,13 +1569,16 @@ class MainWindow(QMainWindow):
             self.db = DatabaseManager(path)
             self.settings.setValue(SETTINGS_LAST_DB, path)
 
-            # Load headers exactly from database and apply to Ingredients tab
+            # Load ingredients FIRST — this detects column positions from headers
+            ingredients = self.db.load_ingredients()
+
+            # NOW _col_map is populated — pass headers + col_map to UI
             all_headers = self.db.load_headers()
             ing_headers = all_headers.get(DatabaseManager.INGREDIENTS_SHEET, [])
             if ing_headers:
-                self.ing_tab.set_headers(ing_headers)
+                self.ing_tab.set_headers(ing_headers, self.db._col_map)
 
-            self.ing_tab.load(self.db.load_ingredients())
+            self.ing_tab.load(ingredients)
             self.meals_tab.load(self.db.load_meals())
             self.menus_tab.load(self.db.load_menus())
             display = path if len(path) <= 65 else str(Path(Path(path).parts[0], "…", *Path(path).parts[-2:]))
@@ -1526,6 +1632,13 @@ def main():
     app.setStyleSheet(_build_stylesheet(arrow_path))
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
+    # Set application icon
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "assets", "01_media", "01_icons", "icon.ico")
+    if os.path.exists(icon_path):
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
+
     focus_filter = SelectAllOnFocus(app)
     app.installEventFilter(focus_filter)
     window = MainWindow()
