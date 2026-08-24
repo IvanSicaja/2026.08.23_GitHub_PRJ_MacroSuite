@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QFileDialog, QAbstractItemView, QGridLayout,
     QInputDialog,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QSize
+from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QSize, QEvent, QObject
 from PySide6.QtGui import QFont as QFontGui, QColor, QAction
 
 
@@ -35,15 +35,15 @@ from PySide6.QtGui import QFont as QFontGui, QColor, QAction
 APP_TITLE = "MacroSuite — Nutrition Planning Software"
 
 NUTRITION_FIELDS = [
-    ("energy_kj",    "Energy (kJ)"),
-    ("energy_kcal",  "Energy (kcal)"),
-    ("fat",          "Fat (g)"),
-    ("saturated_fat","Sat. Fat (g)"),
-    ("carbohydrate", "Carbs (g)"),
-    ("sugars",       "Sugars (g)"),
-    ("fibre",        "Fibre (g)"),
-    ("protein",      "Protein (g)"),
-    ("salt",         "Salt (g)"),
+    ("energy_kj",    "Energy [kJ]"),
+    ("energy_kcal",  "Energy [kcal]"),
+    ("fat",          "Fat [g]"),
+    ("saturated_fat","Sat. Fat [g]"),
+    ("carbohydrate", "Carbs [g]"),
+    ("sugars",       "Sugars [g]"),
+    ("fibre",        "Fibre [g]"),
+    ("protein",      "Protein [g]"),
+    ("salt",         "Salt [g]"),
 ]
 NUTRITION_KEYS   = [k for k, _ in NUTRITION_FIELDS]
 NUTRITION_LABELS = [l for _, l in NUTRITION_FIELDS]
@@ -51,6 +51,21 @@ NUTRITION_LABELS = [l for _, l in NUTRITION_FIELDS]
 SETTINGS_ORG     = "MacroSuite"
 SETTINGS_APP     = "MacroSuite"
 SETTINGS_LAST_DB = "last_database_path"
+
+# ━━━━━━━━━━━━━━━ AUTO-SELECT ON FOCUS ━━━━━━━━━━━━━━━━
+# Industry-standard UX: clicking into any input field selects all
+# existing text so you can immediately start typing a new value.
+
+class SelectAllOnFocus(QObject):
+    """Application-wide event filter: auto-select text on focus for all inputs."""
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn:
+            if isinstance(obj, QDoubleSpinBox):
+                QTimer.singleShot(0, obj.selectAll)
+            elif isinstance(obj, QLineEdit):
+                if not obj.isReadOnly():
+                    QTimer.singleShot(0, obj.selectAll)
+        return super().eventFilter(obj, event)
 
 # ── Colors ──
 C_BG        = "#1c1c1e"
@@ -291,13 +306,13 @@ class DatabaseManager:
 
     MEAL_HEADERS = [
         "MealName", "IngredientID", "IngredientName", "AmountGrams",
-        "Energy (kJ)", "Energy (kcal)", "Fat (g)", "Saturated Fat (g)",
-        "Carbohydrate (g)", "Sugars (g)", "Fibre (g)", "Protein (g)", "Salt (g)",
+        "Energy [kJ]", "Energy [kcal]", "Fat [g]", "Saturated Fat [g]",
+        "Carbohydrate [g]", "Sugars [g]", "Fibre [g]", "Protein [g]", "Salt [g]",
     ]
     MENU_HEADERS = [
         "MenuName", "ItemType", "ItemName", "Amount",
-        "Energy (kJ)", "Energy (kcal)", "Fat (g)", "Saturated Fat (g)",
-        "Carbohydrate (g)", "Sugars (g)", "Fibre (g)", "Protein (g)", "Salt (g)",
+        "Energy [kJ]", "Energy [kcal]", "Fat [g]", "Saturated Fat [g]",
+        "Carbohydrate [g]", "Sugars [g]", "Fibre [g]", "Protein [g]", "Salt [g]",
     ]
 
     def __init__(self, path: str):
@@ -394,9 +409,9 @@ class DatabaseManager:
         ING_H = [
             "ID", "human verified", "Ingredient Name [ENG]", "Brand",
             "Branded Product Name [Original language]", "Basis",
-            "Energy (kJ)", "Energy (kcal)", "Fat (g)", "Saturated Fat (g)",
-            "Carbohydrate (g)", "Sugars (g)", "Fibre (g)", "Protein (g)",
-            "Salt (g)", "Package Size (g)",
+            "Energy [kJ]", "Energy [kcal]", "Fat [g]", "Saturated Fat [g]",
+            "Carbohydrate [g]", "Sugars [g]", "Fibre [g]", "Protein [g]",
+            "Salt [g]", "Package Size [g]",
         ]
         _write_headers(ws, ING_H)
         for r, ing in enumerate(sorted(ingredients.values(), key=lambda i: i.id), 2):
@@ -695,8 +710,7 @@ class IngredientPickerDialog(QDialog):
             self.amount_spin.setRange(0.1, 99999)
             self.amount_spin.setDecimals(1)
             self.amount_spin.setValue(100)
-            self.amount_spin.setSuffix(" g")
-            lay.addRow("Amount", self.amount_spin)
+            lay.addRow("Amount [g]", self.amount_spin)
 
         btns = QHBoxLayout()
         btns.addStretch()
@@ -812,7 +826,7 @@ class AddMenuItemDialog(QDialog):
         self.amount_spin.setRange(0.01, 99999)
         self.amount_spin.setDecimals(1)
         self.amount_spin.setValue(100)
-        self.amount_lbl = QLabel("Amount (g)")
+        self.amount_lbl = QLabel("Amount [g]")
         lay.addRow(self.amount_lbl, self.amount_spin)
 
         btns = QHBoxLayout()
@@ -838,13 +852,11 @@ class AddMenuItemDialog(QDialog):
         self.meal_row_label.setVisible(not is_ing)
 
         if is_ing:
-            self.amount_lbl.setText("Amount (g)")
-            self.amount_spin.setSuffix(" g")
+            self.amount_lbl.setText("Amount [g]")
             self.amount_spin.setValue(100)
             self._populate_brands()
         else:
-            self.amount_lbl.setText("Servings")
-            self.amount_spin.setSuffix(" ×")
+            self.amount_lbl.setText("Servings [×]")
             self.amount_spin.setValue(1.0)
             self.meal_combo.clear()
             names = sorted(self.meals.keys())
@@ -950,7 +962,7 @@ class IngredientsTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setSortingEnabled(True)
         self.table.doubleClicked.connect(self._edit)
-        cols = ["ID", "Name", "Brand", "Product"] + NUTRITION_LABELS + ["Pkg Size"]
+        cols = ["ID", "Name", "Brand", "Product"] + NUTRITION_LABELS + ["Pkg Size [g]"]
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
         lay.addWidget(self.table)
@@ -1070,14 +1082,14 @@ class MealsTab(QWidget):
         self.title_lbl = QLabel("Select a meal"); self.title_lbl.setObjectName("sectionTitle")
         right.addWidget(self.title_lbl)
 
-        # Table with columns: Ingredient | Amount (g) | all nutrition columns
+        # Table with columns: Ingredient | Amount [g] | all nutrition columns
         self.detail = QTableWidget()
         self.detail.setAlternatingRowColors(True)
         self.detail.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
         self.detail.horizontalHeader().setStretchLastSection(True)
-        cols = ["Ingredient", "Amount (g)"] + NUTRITION_LABELS
+        cols = ["Ingredient", "Amount [g]"] + NUTRITION_LABELS
         self.detail.setColumnCount(len(cols))
         self.detail.setHorizontalHeaderLabels(cols)
         right.addWidget(self.detail)
@@ -1224,7 +1236,7 @@ class MealsTab(QWidget):
         if not m or row < 0 or row >= len(m.items):
             return
         mi = m.items[row]
-        amt, ok = QInputDialog.getDouble(self, "Edit Amount", "Amount (g):", mi.amount_grams, 0.1, 99999, 1)
+        amt, ok = QInputDialog.getDouble(self, "Edit Amount", "Amount [g]:", mi.amount_grams, 0.1, 99999, 1)
         if ok:
             mi.amount_grams = amt
             self._refresh()
@@ -1287,14 +1299,14 @@ class MenusTab(QWidget):
         self.title_lbl = QLabel("Select a menu"); self.title_lbl.setObjectName("sectionTitle")
         right.addWidget(self.title_lbl)
 
-        # Table: Type | Name | Amount | Weight (g) | nutrition…
+        # Table: Type | Name | Amount | Weight [g] | nutrition…
         self.detail = QTableWidget()
         self.detail.setAlternatingRowColors(True)
         self.detail.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
         self.detail.horizontalHeader().setStretchLastSection(True)
-        cols = ["Type", "Name", "Amount", "Weight (g)"] + NUTRITION_LABELS
+        cols = ["Type", "Name", "Amount", "Weight [g]"] + NUTRITION_LABELS
         self.detail.setColumnCount(len(cols))
         self.detail.setHorizontalHeaderLabels(cols)
         right.addWidget(self.detail)
@@ -1358,8 +1370,8 @@ class MenusTab(QWidget):
             self.detail.setItem(r, 1, QTableWidgetItem(entry.item_name))
 
             if entry.item_type == "ingredient":
-                self.detail.setItem(r, 2, _num_item(entry.amount, " g"))
-                self.detail.setItem(r, 3, _num_item(entry.amount, " g"))
+                self.detail.setItem(r, 2, _num_item(entry.amount))
+                self.detail.setItem(r, 3, _num_item(entry.amount))
                 ing = _find_ing(entry.item_name, self.ingredients)
                 if ing:
                     sc = ing.scaled_nutrition(entry.amount)
@@ -1370,7 +1382,7 @@ class MenusTab(QWidget):
                 meal = self.meals.get(entry.item_name)
                 if meal:
                     mg, mt = NutritionCalc.meal_totals(meal, self.ingredients)
-                    self.detail.setItem(r, 3, _num_item(round(mg * entry.amount, 1), " g"))
+                    self.detail.setItem(r, 3, _num_item(round(mg * entry.amount, 1)))
                     for c, key in enumerate(NUTRITION_KEYS):
                         self.detail.setItem(r, 4 + c, _num_item(round(mt[key] * entry.amount, 2)))
 
@@ -1456,7 +1468,7 @@ class MenusTab(QWidget):
         if not m or row < 0 or row >= len(m.items):
             return
         entry = m.items[row]
-        label = "Amount (g):" if entry.item_type == "ingredient" else "Servings:"
+        label = "Amount [g]:" if entry.item_type == "ingredient" else "Servings [×]:"
         amt, ok = QInputDialog.getDouble(self, "Edit Amount", label, entry.amount, 0.01, 99999, 2)
         if ok:
             entry.amount = amt
@@ -1618,6 +1630,10 @@ def main():
     app.setStyleSheet(DARK_STYLE)
     app.setApplicationName(SETTINGS_APP)
     app.setOrganizationName(SETTINGS_ORG)
+
+    # Auto-select text on focus for all input fields (type to replace)
+    focus_filter = SelectAllOnFocus(app)
+    app.installEventFilter(focus_filter)
 
     window = MainWindow()
     window.showMaximized()   # fullscreen mode
