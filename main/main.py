@@ -53,13 +53,10 @@ SETTINGS_ORG     = "MacroSuite"
 SETTINGS_APP     = "MacroSuite"
 SETTINGS_LAST_DB = "last_database_path"
 
-# ── Calorie category colors (subtle dark-theme tints) ──
-CAL_GREEN   = QColor(28, 52, 36)     # 0–149 kcal  (low)
-CAL_YELLOW  = QColor(52, 50, 24)     # 150–399 kcal (medium)
-CAL_ORANGE  = QColor(56, 36, 22)     # ≥400 kcal   (high)
-CAL_GREEN2  = QColor(32, 58, 40)     # alternating shade
-CAL_YELLOW2 = QColor(58, 55, 28)
-CAL_ORANGE2 = QColor(62, 42, 26)
+# ── Calorie text colors (light, comfortable on dark background) ──
+CAL_TEXT_GREEN  = QColor(125, 205, 145)   # 0–149 kcal  — soft green
+CAL_TEXT_YELLOW = QColor(215, 200, 95)    # 150–399 kcal — soft gold
+CAL_TEXT_ORANGE = QColor(215, 140, 90)    # ≥400 kcal   — soft orange
 
 # ── Theme colors ──
 C_BG        = "#1c1c1e"
@@ -81,36 +78,64 @@ C_PER100_BG  = "#2a2a2c"
 # ━━━━━━━━━━━━━━━ AUTO-SELECT ON FOCUS ━━━━━━━━━━━━━━━━
 
 class SelectAllOnFocus(QObject):
-    """Select all text when an input gains focus — by keyboard OR mouse."""
+    """
+    Application-wide event filter:
+    1. Select-all on focus for every input — keyboard (Tab) AND mouse click.
+    2. Ctrl+Space / Alt+Down opens combo-box dropdowns.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._just_focused = None
+        self._pending = None          # widget awaiting mouse-release
 
     def eventFilter(self, obj, event):
+        et = event.type()
+
+        # ── Ctrl+Space / Alt+Down → open combo dropdown ──
+        if et == QEvent.KeyPress:
+            ctrl_space = event.key() == Qt.Key_Space and event.modifiers() & Qt.ControlModifier
+            alt_down   = event.key() == Qt.Key_Down  and event.modifiers() & Qt.AltModifier
+            if ctrl_space or alt_down:
+                combo = None
+                if isinstance(obj, QComboBox):
+                    combo = obj
+                elif isinstance(obj, QLineEdit) and isinstance(obj.parent(), QComboBox):
+                    combo = obj.parent()
+                if combo:
+                    combo.showPopup()
+                    return True
+
+        # ── Select-all on focus ──
         if not isinstance(obj, (QDoubleSpinBox, QLineEdit)):
             return super().eventFilter(obj, event)
         if isinstance(obj, QLineEdit) and obj.isReadOnly():
             return super().eventFilter(obj, event)
 
-        etype = event.type()
+        if et == QEvent.FocusIn:
+            try:
+                reason = event.reason()
+            except Exception:
+                reason = Qt.OtherFocusReason
 
-        if etype == QEvent.FocusIn:
-            self._just_focused = obj
-            QTimer.singleShot(0, lambda o=obj: self._do_select(o))
+            if reason == Qt.MouseFocusReason:
+                # Mouse click — defer until release (after cursor placement)
+                self._pending = obj
+            else:
+                # Tab / shortcut / programmatic — select immediately
+                QTimer.singleShot(0, lambda o=obj: self._sel(o))
 
-        elif etype == QEvent.MouseButtonRelease:
-            if self._just_focused is obj:
-                self._just_focused = None
-                QTimer.singleShot(0, lambda o=obj: self._do_select(o))
+        elif et == QEvent.MouseButtonRelease:
+            if self._pending is obj:
+                self._pending = None
+                QTimer.singleShot(0, lambda o=obj: self._sel(o))
 
         return super().eventFilter(obj, event)
 
     @staticmethod
-    def _do_select(obj):
+    def _sel(obj):
         if isinstance(obj, QDoubleSpinBox):
             obj.selectAll()
-        elif isinstance(obj, QLineEdit):
+        elif isinstance(obj, QLineEdit) and not obj.isReadOnly():
             obj.selectAll()
 
 
@@ -582,14 +607,14 @@ def _find_ing(name, ingredients):
 
 # ━━━━━━━━━━━━━━━━━━ TABLE HELPERS ━━━━━━━━━━━━━━━━━━━━
 
-def _calorie_color(kcal_per100: float, alt: bool = False) -> QColor:
-    """Return a subtle background tint based on energy density per 100 g."""
+def _calorie_text_color(kcal_per100: float) -> QColor:
+    """Return a light text color based on energy density per 100 g."""
     if kcal_per100 < 150:
-        return CAL_GREEN2 if alt else CAL_GREEN
+        return CAL_TEXT_GREEN
     elif kcal_per100 < 400:
-        return CAL_YELLOW2 if alt else CAL_YELLOW
+        return CAL_TEXT_YELLOW
     else:
-        return CAL_ORANGE2 if alt else CAL_ORANGE
+        return CAL_TEXT_ORANGE
 
 
 def _num_item(value, suffix=""):
@@ -606,12 +631,12 @@ def _num_item(value, suffix=""):
     return item
 
 
-def _color_row(table: QTableWidget, row: int, color: QColor):
-    """Apply a background color to every cell in a row."""
+def _color_row_text(table: QTableWidget, row: int, color: QColor):
+    """Apply a text (foreground) color to every cell in a row."""
     for col in range(table.columnCount()):
         item = table.item(row, col)
         if item:
-            item.setBackground(color)
+            item.setForeground(color)
 
 
 def _make_total_item(text, is_label=False):
@@ -715,6 +740,10 @@ class IngredientDialog(QDialog):
         c = QCompleter(items)
         c.setCaseSensitivity(Qt.CaseInsensitive)
         c.setFilterMode(Qt.MatchContains)
+        c.popup().setStyleSheet(
+            f"background: #3a3a3c; color: {C_TEXT}; border: 1px solid {C_BORDER2};"
+            f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;"
+        )
         edit.setCompleter(c)
 
     def get_ingredient(self):
@@ -784,6 +813,10 @@ class IngredientPickerDialog(QDialog):
         c = QCompleter(items)
         c.setCaseSensitivity(Qt.CaseInsensitive)
         c.setFilterMode(Qt.MatchContains)
+        c.popup().setStyleSheet(
+            f"background: #3a3a3c; color: {C_TEXT}; border: 1px solid {C_BORDER2};"
+            f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;"
+        )
         combo.setCompleter(c)
 
     def _filtered(self):
@@ -889,6 +922,10 @@ class AddMenuItemDialog(QDialog):
         c = QCompleter(items)
         c.setCaseSensitivity(Qt.CaseInsensitive)
         c.setFilterMode(Qt.MatchContains)
+        c.popup().setStyleSheet(
+            f"background: #3a3a3c; color: {C_TEXT}; border: 1px solid {C_BORDER2};"
+            f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;"
+        )
         combo.setCompleter(c)
 
     def _on_type(self, idx):
@@ -991,7 +1028,7 @@ class IngredientsTab(QWidget):
         lay.addLayout(hdr)
 
         self.table = QTableWidget()
-        self.table.setAlternatingRowColors(False)  # we handle colors manually
+        self.table.setAlternatingRowColors(True)  # we handle colors manually
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1028,7 +1065,7 @@ class IngredientsTab(QWidget):
                 self.table.setItem(r, 4 + c, _num_item(getattr(ing, key)))
             self.table.setItem(r, 4 + len(NUTRITION_KEYS), QTableWidgetItem(ing.package_size))
             # Color row by calorie density
-            _color_row(self.table, r, _calorie_color(ing.energy_kcal, r % 2 == 1))
+            _color_row_text(self.table, r, _calorie_text_color(ing.energy_kcal))
         self.table.resizeColumnsToContents()
         self.table.setSortingEnabled(True)
 
@@ -1113,7 +1150,7 @@ class MealsTab(QWidget):
         right.addWidget(self.title_lbl)
 
         self.detail = QTableWidget()
-        self.detail.setAlternatingRowColors(False)
+        self.detail.setAlternatingRowColors(True)
         self.detail.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
@@ -1175,7 +1212,7 @@ class MealsTab(QWidget):
                 sc = ing.scaled_nutrition(mi.amount_grams)
                 for c, key in enumerate(NUTRITION_KEYS):
                     self.detail.setItem(r, 2 + c, _num_item(sc[key]))
-                _color_row(self.detail, r, _calorie_color(ing.energy_kcal, r % 2 == 1))
+                _color_row_text(self.detail, r, _calorie_text_color(ing.energy_kcal))
 
         # TOTAL
         tg, tt = NutritionCalc.meal_totals(meal, self.ingredients)
@@ -1287,7 +1324,7 @@ class MenusTab(QWidget):
         right.addWidget(self.title_lbl)
 
         self.detail = QTableWidget()
-        self.detail.setAlternatingRowColors(False)
+        self.detail.setAlternatingRowColors(True)
         self.detail.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
@@ -1367,7 +1404,7 @@ class MenusTab(QWidget):
                     p100 = NutritionCalc.per100(mg, mt)
                     kcal_for_color = p100.get("energy_kcal", 0)
 
-            _color_row(self.detail, r, _calorie_color(kcal_for_color, r % 2 == 1))
+            _color_row_text(self.detail, r, _calorie_text_color(kcal_for_color))
 
         # TOTAL
         tg, tt = NutritionCalc.menu_totals(menu, self.meals, self.ingredients)
