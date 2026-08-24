@@ -92,6 +92,7 @@ class SelectAllOnFocus(QObject):
         et = event.type()
 
         # ── Ctrl+Space / Alt+Down → open combo dropdown ──
+        # ── Tab → cycle through completer suggestions ──
         if et == QEvent.KeyPress:
             ctrl_space = event.key() == Qt.Key_Space and event.modifiers() & Qt.ControlModifier
             alt_down   = event.key() == Qt.Key_Down  and event.modifiers() & Qt.AltModifier
@@ -104,6 +105,24 @@ class SelectAllOnFocus(QObject):
                 if combo:
                     combo.showPopup()
                     return True
+
+            # Tab cycles through visible completer suggestions
+            if event.key() == Qt.Key_Tab and isinstance(obj, QLineEdit):
+                comp = obj.completer()
+                if comp and comp.popup() and comp.popup().isVisible():
+                    popup = comp.popup()
+                    model = comp.completionModel()
+                    if model.rowCount() > 0:
+                        cur = popup.currentIndex()
+                        next_row = (cur.row() + 1) if cur.isValid() and cur.row() >= 0 else 0
+                        if next_row >= model.rowCount():
+                            next_row = 0
+                        idx = model.index(next_row, 0)
+                        popup.setCurrentIndex(idx)
+                        text = idx.data()
+                        if text:
+                            obj.setText(text)
+                    return True  # consume Tab while popup is open
 
         # ── Select-all on focus ──
         if not isinstance(obj, (QDoubleSpinBox, QLineEdit)):
@@ -460,23 +479,44 @@ class DatabaseManager:
         wb.close()
         return menus
 
-    # ── Write (preserves Ingredients formatting) ──
+    # ── Write (ZERO formatting changes — values only) ──
 
     def save_all(self, ingredients, meals, menus):
-        # Load EXISTING workbook to preserve all formatting
         wb = openpyxl.load_workbook(self.path)
 
-        # — Ingredients: update VALUES only, never touch styles —
+        # ── INGREDIENTS: in-place value updates ──
+        # • Each ingredient stays in its original row
+        # • Column B is NEVER touched
+        # • Empty/skeleton rows are NEVER touched
+        # • Only columns C–P are written for active ingredients
         ws = wb[self.INGREDIENTS_SHEET]
-        max_c = max(ws.max_column or 16, 16)
-        # Clear data values (row 2+), keep styles intact
-        for row_idx in range(2, (ws.max_row or 1) + 1):
-            for col_idx in range(1, max_c + 1):
-                ws.cell(row_idx, col_idx).value = None
 
-        for r, ing in enumerate(sorted(ingredients.values(), key=lambda i: i.id), 2):
-            ws.cell(r, 1).value = ing.id
-            ws.cell(r, 2).value = 3
+        # Map existing IDs → row numbers
+        id_to_row: Dict[int, int] = {}
+        for r in range(2, (ws.max_row or 1) + 1):
+            rid = ws.cell(r, 1).value
+            if rid is not None:
+                try:
+                    id_to_row[int(rid)] = r
+                except (ValueError, TypeError):
+                    pass
+
+        used_rows = set(id_to_row.values())
+        written_ids = set()
+
+        for ing in ingredients.values():
+            if ing.id in id_to_row:
+                r = id_to_row[ing.id]
+            else:
+                # New ingredient → first unused row
+                r = 2
+                while r in used_rows:
+                    r += 1
+                used_rows.add(r)
+                ws.cell(r, 1).value = ing.id   # set ID for new rows only
+
+            written_ids.add(ing.id)
+            # Update ONLY data columns — NEVER column A (ID) or B (human verified)
             ws.cell(r, 3).value = ing.name
             ws.cell(r, 4).value = ing.brand
             ws.cell(r, 5).value = ing.product_name
@@ -485,38 +525,56 @@ class DatabaseManager:
                 ws.cell(r, 7 + c).value = getattr(ing, key)
             ws.cell(r, 16).value = ing.package_size
 
-        # — Meals: recreate (app-managed sheet) —
-        if self.MEALS_SHEET in wb.sheetnames:
-            del wb[self.MEALS_SHEET]
-        ws2 = wb.create_sheet(self.MEALS_SHEET)
-        _write_headers(ws2, self.MEAL_HEADERS)
+        # Clear deleted ingredients (cols C–P only, keep ID & col B)
+        for old_id, old_row in id_to_row.items():
+            if old_id not in written_ids:
+                for col in range(3, 17):
+                    ws.cell(old_row, col).value = None
+
+        # ── MEALS: values only, no sheet deletion, no formatting ──
+        ws2 = wb[self.MEALS_SHEET]
+        mc2 = max(ws2.max_column or 1, len(self.MEAL_HEADERS))
+        # Set header values (no formatting applied)
+        for c, h in enumerate(self.MEAL_HEADERS, 1):
+            ws2.cell(1, c).value = h
+        # Clear data values only
+        for r in range(2, (ws2.max_row or 1) + 1):
+            for c in range(1, mc2 + 1):
+                ws2.cell(r, c).value = None
+        # Write meal data
         r = 2
         for meal in meals.values():
             if not meal.items:
-                ws2.cell(r, 1, meal.name); r += 1; continue
+                ws2.cell(r, 1).value = meal.name; r += 1; continue
             for mi in meal.items:
-                ws2.cell(r, 1, meal.name); ws2.cell(r, 2, mi.ingredient_id)
+                ws2.cell(r, 1).value = meal.name
+                ws2.cell(r, 2).value = mi.ingredient_id
                 ing = ingredients.get(mi.ingredient_id)
-                ws2.cell(r, 3, ing.name if ing else "?")
-                ws2.cell(r, 4, mi.amount_grams)
+                ws2.cell(r, 3).value = ing.name if ing else "?"
+                ws2.cell(r, 4).value = mi.amount_grams
                 if ing:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
                     for c, key in enumerate(NUTRITION_KEYS):
-                        ws2.cell(r, 5 + c, nutr[key])
+                        ws2.cell(r, 5 + c).value = nutr[key]
                 r += 1
 
-        # — Menus: recreate (app-managed sheet) —
-        if self.MENUS_SHEET in wb.sheetnames:
-            del wb[self.MENUS_SHEET]
-        ws3 = wb.create_sheet(self.MENUS_SHEET)
-        _write_headers(ws3, self.MENU_HEADERS)
+        # ── MENUS: values only, no sheet deletion, no formatting ──
+        ws3 = wb[self.MENUS_SHEET]
+        mc3 = max(ws3.max_column or 1, len(self.MENU_HEADERS))
+        for c, h in enumerate(self.MENU_HEADERS, 1):
+            ws3.cell(1, c).value = h
+        for r in range(2, (ws3.max_row or 1) + 1):
+            for c in range(1, mc3 + 1):
+                ws3.cell(r, c).value = None
         r = 2
         for menu in menus.values():
             if not menu.items:
-                ws3.cell(r, 1, menu.name); r += 1; continue
+                ws3.cell(r, 1).value = menu.name; r += 1; continue
             for entry in menu.items:
-                ws3.cell(r, 1, menu.name); ws3.cell(r, 2, entry.item_type)
-                ws3.cell(r, 3, entry.item_name); ws3.cell(r, 4, entry.amount)
+                ws3.cell(r, 1).value = menu.name
+                ws3.cell(r, 2).value = entry.item_type
+                ws3.cell(r, 3).value = entry.item_name
+                ws3.cell(r, 4).value = entry.amount
                 r += 1
 
         # Atomic write
@@ -729,7 +787,7 @@ class IngredientDialog(QDialog):
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary")
         cancel.clicked.connect(self.reject)
-        save = QPushButton("Save"); save.clicked.connect(self.accept)
+        save = QPushButton("Save"); save.clicked.connect(self.accept); save.setDefault(True)
         btns.addWidget(cancel); btns.addWidget(save)
         lay.addRow(btns)
 
@@ -802,7 +860,7 @@ class IngredientPickerDialog(QDialog):
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary")
         cancel.clicked.connect(self.reject)
-        add = QPushButton("Add"); add.clicked.connect(self.accept)
+        add = QPushButton("Add"); add.clicked.connect(self.accept); add.setDefault(True)
         btns.addWidget(cancel); btns.addWidget(add)
         lay.addRow(btns)
 
@@ -911,7 +969,7 @@ class AddMenuItemDialog(QDialog):
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary")
         cancel.clicked.connect(self.reject)
-        add = QPushButton("Add"); add.clicked.connect(self.accept)
+        add = QPushButton("Add"); add.clicked.connect(self.accept); add.setDefault(True)
         btns.addWidget(cancel); btns.addWidget(add)
         lay.addRow(btns)
 
