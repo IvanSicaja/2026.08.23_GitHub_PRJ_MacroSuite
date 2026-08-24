@@ -140,23 +140,28 @@ class SelectAllOnFocus(QObject):
                     return True
 
         # ── Select-all on focus (works for mouse AND keyboard) ──
-        if not isinstance(obj, (QDoubleSpinBox, QLineEdit)):
+        # Handle QComboBox by targeting its internal lineEdit
+        target = obj
+        if isinstance(obj, QComboBox) and obj.isEditable() and obj.lineEdit():
+            target = obj.lineEdit()
+
+        if not isinstance(target, (QDoubleSpinBox, QLineEdit)):
             return super().eventFilter(obj, event)
-        if isinstance(obj, QLineEdit) and obj.isReadOnly():
+        if isinstance(target, QLineEdit) and target.isReadOnly():
             return super().eventFilter(obj, event)
 
-        oid = id(obj)
+        oid = id(target)
 
         if et == QEvent.FocusIn:
             # Widget just gained focus — mark it and select all
             self._just_focused.add(oid)
-            QTimer.singleShot(0, lambda o=obj: self._sel(o))
+            QTimer.singleShot(0, lambda o=target: self._sel(o))
 
         elif et == QEvent.MouseButtonRelease:
             if oid in self._just_focused:
                 # FIRST click after focus gain — re-select (overrides cursor placement)
                 self._just_focused.discard(oid)
-                QTimer.singleShot(0, lambda o=obj: self._sel(o))
+                QTimer.singleShot(0, lambda o=target: self._sel(o))
             # Second+ click: oid not in set → normal cursor behavior
 
         elif et == QEvent.FocusOut:
@@ -745,12 +750,25 @@ def _calorie_text_color(kcal_per100: float) -> QColor:
         return CAL_TEXT_ORANGE
 
 
+class NumericItem(QTableWidgetItem):
+    """Table item that sorts numerically instead of alphabetically."""
+    def __lt__(self, other):
+        v1 = self.data(Qt.UserRole)
+        v2 = other.data(Qt.UserRole) if other else None
+        if v1 is not None and v2 is not None:
+            try:
+                return float(v1) < float(v2)
+            except (TypeError, ValueError):
+                pass
+        return super().__lt__(other)
+
+
 def _num_item(value, suffix=""):
     if isinstance(value, float):
         text = f"{value:.2f}" if value != int(value) else str(int(value))
     else:
         text = str(value)
-    item = QTableWidgetItem(text + suffix)
+    item = NumericItem(text + suffix)
     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
     try:
         item.setData(Qt.UserRole, float(value))
@@ -1677,6 +1695,14 @@ class MainWindow(QMainWindow):
         # Also handle Ctrl+= (Plus without Shift on some keyboards)
         add_sc2 = QShortcut(QKeySequence("Ctrl+="), self)
         add_sc2.activated.connect(self._on_add_shortcut)
+
+        # Ctrl+Tab / Ctrl+Shift+Tab → cycle tabs
+        tab_fwd = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        tab_fwd.activated.connect(lambda: self.tabs.setCurrentIndex(
+            (self.tabs.currentIndex() + 1) % self.tabs.count()))
+        tab_bwd = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        tab_bwd.activated.connect(lambda: self.tabs.setCurrentIndex(
+            (self.tabs.currentIndex() - 1) % self.tabs.count()))
 
         last = self.settings.value(SETTINGS_LAST_DB, "")
         if last and Path(last).is_file():
