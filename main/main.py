@@ -479,25 +479,49 @@ class DatabaseManager:
         wb.close()
         return menus
 
-    # ── Write (ZERO formatting changes — values only) ──
+    # ── Write (ABSOLUTE ZERO formatting changes) ──
+    # Key insight: ws.cell(r,c) CREATES a cell with default (white) formatting
+    # if none exists. We must NEVER access cells we don't need to write to.
+
+    @staticmethod
+    def _safe_write(ws, row, col, value):
+        """Write value to cell. For empty/None values, only clear existing cells.
+        NEVER creates a new cell for an empty value."""
+        if value is not None and value != "":
+            ws.cell(row, col).value = value
+        elif (row, col) in ws._cells:
+            ws._cells[(row, col)].value = None
+        # else: cell doesn't exist and value is empty → do nothing
+
+    @staticmethod
+    def _clear_existing_data(ws, min_row=2):
+        """Clear values of ONLY cells that actually exist and have data.
+        Never creates new cells, never touches formatting."""
+        for (r, c), cell in list(ws._cells.items()):
+            if r >= min_row and cell.value is not None:
+                cell.value = None
+
+    @staticmethod
+    def _copy_style_to(ws, row, col, style):
+        """After writing to a new cell, apply the sheet's data style."""
+        if style is not None and (row, col) in ws._cells:
+            ws._cells[(row, col)]._style = style
 
     def save_all(self, ingredients, meals, menus):
         wb = openpyxl.load_workbook(self.path)
 
-        # ── INGREDIENTS: in-place value updates ──
+        # ── INGREDIENTS ──
         # • Each ingredient stays in its original row
         # • Column B is NEVER touched
-        # • Empty/skeleton rows are NEVER touched
-        # • Only columns C–P are written for active ingredients
+        # • Empty cells are NEVER created
         ws = wb[self.INGREDIENTS_SHEET]
 
-        # Map existing IDs → row numbers
+        # Map existing IDs → row numbers (only read, don't create cells)
         id_to_row: Dict[int, int] = {}
-        for r in range(2, (ws.max_row or 1) + 1):
-            rid = ws.cell(r, 1).value
-            if rid is not None:
+        for (r, c), cell in ws._cells.items():
+            if r >= 2 and c == 1 and cell.value is not None:
                 try:
-                    id_to_row[int(rid)] = r
+                    id_to_row[int(cell.value)] = r
                 except (ValueError, TypeError):
                     pass
 
@@ -508,44 +532,58 @@ class DatabaseManager:
             if ing.id in id_to_row:
                 r = id_to_row[ing.id]
             else:
-                # New ingredient → first unused row
                 r = 2
                 while r in used_rows:
                     r += 1
                 used_rows.add(r)
-                ws.cell(r, 1).value = ing.id   # set ID for new rows only
+                self._safe_write(ws, r, 1, ing.id)
 
             written_ids.add(ing.id)
-            # Update ONLY data columns — NEVER column A (ID) or B (human verified)
-            ws.cell(r, 3).value = ing.name
-            ws.cell(r, 4).value = ing.brand
-            ws.cell(r, 5).value = ing.product_name
-            ws.cell(r, 6).value = "per 100 g"
+            # Write data — use _safe_write to avoid creating cells for empty values
+            self._safe_write(ws, r, 3, ing.name)
+            self._safe_write(ws, r, 4, ing.brand or None)
+            self._safe_write(ws, r, 5, ing.product_name or None)
+            self._safe_write(ws, r, 6, "per 100 g")
             for c, key in enumerate(NUTRITION_KEYS):
-                ws.cell(r, 7 + c).value = getattr(ing, key)
-            ws.cell(r, 16).value = ing.package_size
+                val = getattr(ing, key)
+                self._safe_write(ws, r, 7 + c, val if val else None)
+            self._safe_write(ws, r, 16, ing.package_size or None)
 
-        # Clear deleted ingredients (cols C–P only, keep ID & col B)
+        # Clear deleted ingredients — only columns that exist
         for old_id, old_row in id_to_row.items():
             if old_id not in written_ids:
                 for col in range(3, 17):
-                    ws.cell(old_row, col).value = None
+                    if (old_row, col) in ws._cells:
+                        ws._cells[(old_row, col)].value = None
 
-        # ── MEALS: values only, no sheet deletion, no formatting ──
+        # ── MEALS ──
         ws2 = wb[self.MEALS_SHEET]
-        mc2 = max(ws2.max_column or 1, len(self.MEAL_HEADERS))
-        # Set header values (no formatting applied)
+
+        # Capture a data cell's style to apply to new cells
+        data_style = None
+        for (r, c), cell in ws2._cells.items():
+            if r >= 2:
+                data_style = cell._style
+                break
+
+        # Update headers — preserve each cell's own formatting
         for c, h in enumerate(self.MEAL_HEADERS, 1):
-            ws2.cell(1, c).value = h
-        # Clear data values only
-        for r in range(2, (ws2.max_row or 1) + 1):
-            for c in range(1, mc2 + 1):
-                ws2.cell(r, c).value = None
-        # Write meal data
+            if (1, c) in ws2._cells:
+                ws2._cells[(1, c)].value = h  # existing cell: update value only
+            else:
+                ws2.cell(1, c).value = h  # new cell: unavoidable creation
+
+        # Clear ONLY existing data cells
+        self._clear_existing_data(ws2, min_row=2)
+
+        # Write meal data, applying the original data style
         r = 2
         for meal in meals.values():
             if not meal.items:
-                ws2.cell(r, 1).value = meal.name; r += 1; continue
+                ws2.cell(r, 1).value = meal.name
+                self._copy_style_to(ws2, r, 1, data_style)
+                r += 1
+                continue
             for mi in meal.items:
                 ws2.cell(r, 1).value = meal.name
                 ws2.cell(r, 2).value = mi.ingredient_id
@@ -556,25 +594,42 @@ class DatabaseManager:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
                     for c, key in enumerate(NUTRITION_KEYS):
                         ws2.cell(r, 5 + c).value = nutr[key]
+                # Apply original data style to all written cells in this row
+                for c in range(1, 5 + len(NUTRITION_KEYS)):
+                    self._copy_style_to(ws2, r, c, data_style)
                 r += 1
 
-        # ── MENUS: values only, no sheet deletion, no formatting ──
+        # ── MENUS ──
         ws3 = wb[self.MENUS_SHEET]
-        mc3 = max(ws3.max_column or 1, len(self.MENU_HEADERS))
+
+        data_style3 = None
+        for (r, c), cell in ws3._cells.items():
+            if r >= 2:
+                data_style3 = cell._style
+                break
+
         for c, h in enumerate(self.MENU_HEADERS, 1):
-            ws3.cell(1, c).value = h
-        for r in range(2, (ws3.max_row or 1) + 1):
-            for c in range(1, mc3 + 1):
-                ws3.cell(r, c).value = None
+            if (1, c) in ws3._cells:
+                ws3._cells[(1, c)].value = h
+            else:
+                ws3.cell(1, c).value = h
+
+        self._clear_existing_data(ws3, min_row=2)
+
         r = 2
         for menu in menus.values():
             if not menu.items:
-                ws3.cell(r, 1).value = menu.name; r += 1; continue
+                ws3.cell(r, 1).value = menu.name
+                self._copy_style_to(ws3, r, 1, data_style3)
+                r += 1
+                continue
             for entry in menu.items:
                 ws3.cell(r, 1).value = menu.name
                 ws3.cell(r, 2).value = entry.item_type
                 ws3.cell(r, 3).value = entry.item_name
                 ws3.cell(r, 4).value = entry.amount
+                for c in range(1, 5):
+                    self._copy_style_to(ws3, r, c, data_style3)
                 r += 1
 
         # Atomic write
