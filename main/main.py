@@ -49,6 +49,19 @@ NUTRITION_FIELDS = [
 NUTRITION_KEYS   = [k for k, _ in NUTRITION_FIELDS]
 NUTRITION_LABELS = [l for _, l in NUTRITION_FIELDS]
 
+# Excel column order for nutrition (col 7+): user has kcal in G, kJ in H
+EXCEL_COL_ORDER = [
+    "energy_kcal",   # G (col 7)
+    "energy_kj",     # H (col 8)
+    "fat",           # I (col 9)
+    "saturated_fat", # J (col 10)
+    "carbohydrate",  # K (col 11)
+    "sugars",        # L (col 12)
+    "fibre",         # M (col 13)
+    "protein",       # N (col 14)
+    "salt",          # O (col 15)
+]
+
 SETTINGS_ORG     = "MacroSuite"
 SETTINGS_APP     = "MacroSuite"
 SETTINGS_LAST_DB = "last_database_path"
@@ -80,20 +93,22 @@ C_PER100_BG  = "#2a2a2c"
 class SelectAllOnFocus(QObject):
     """
     Application-wide event filter:
-    1. Select-all on focus for every input — keyboard (Tab) AND mouse click.
-    2. Ctrl+Space / Alt+Down opens combo-box dropdowns.
+    1. First click / Tab into a field → select all (typing replaces content).
+    2. Second click on same field → normal cursor (for editing).
+    3. Ctrl+Space / Alt+Down → open combo dropdown.
+    4. Tab while completer is open → cycle suggestions.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pending = None          # widget awaiting mouse-release
+        self._just_focused = set()   # widget ids that just gained focus
 
     def eventFilter(self, obj, event):
         et = event.type()
 
-        # ── Ctrl+Space / Alt+Down → open combo dropdown ──
-        # ── Tab → cycle through completer suggestions ──
+        # ── Keyboard shortcuts ──
         if et == QEvent.KeyPress:
+            # Ctrl+Space / Alt+Down → open combo dropdown
             ctrl_space = event.key() == Qt.Key_Space and event.modifiers() & Qt.ControlModifier
             alt_down   = event.key() == Qt.Key_Down  and event.modifiers() & Qt.AltModifier
             if ctrl_space or alt_down:
@@ -114,39 +129,38 @@ class SelectAllOnFocus(QObject):
                     model = comp.completionModel()
                     if model.rowCount() > 0:
                         cur = popup.currentIndex()
-                        next_row = (cur.row() + 1) if cur.isValid() and cur.row() >= 0 else 0
-                        if next_row >= model.rowCount():
-                            next_row = 0
-                        idx = model.index(next_row, 0)
+                        nxt = (cur.row() + 1) if cur.isValid() and cur.row() >= 0 else 0
+                        if nxt >= model.rowCount():
+                            nxt = 0
+                        idx = model.index(nxt, 0)
                         popup.setCurrentIndex(idx)
                         text = idx.data()
                         if text:
                             obj.setText(text)
-                    return True  # consume Tab while popup is open
+                    return True
 
-        # ── Select-all on focus ──
+        # ── Select-all on focus (works for mouse AND keyboard) ──
         if not isinstance(obj, (QDoubleSpinBox, QLineEdit)):
             return super().eventFilter(obj, event)
         if isinstance(obj, QLineEdit) and obj.isReadOnly():
             return super().eventFilter(obj, event)
 
-        if et == QEvent.FocusIn:
-            try:
-                reason = event.reason()
-            except Exception:
-                reason = Qt.OtherFocusReason
+        oid = id(obj)
 
-            if reason == Qt.MouseFocusReason:
-                # Mouse click — defer until release (after cursor placement)
-                self._pending = obj
-            else:
-                # Tab / shortcut / programmatic — select immediately
-                QTimer.singleShot(0, lambda o=obj: self._sel(o))
+        if et == QEvent.FocusIn:
+            # Widget just gained focus — mark it and select all
+            self._just_focused.add(oid)
+            QTimer.singleShot(0, lambda o=obj: self._sel(o))
 
         elif et == QEvent.MouseButtonRelease:
-            if self._pending is obj:
-                self._pending = None
+            if oid in self._just_focused:
+                # FIRST click after focus gain — re-select (overrides cursor placement)
+                self._just_focused.discard(oid)
                 QTimer.singleShot(0, lambda o=obj: self._sel(o))
+            # Second+ click: oid not in set → normal cursor behavior
+
+        elif et == QEvent.FocusOut:
+            self._just_focused.discard(oid)
 
         return super().eventFilter(obj, event)
 
@@ -411,7 +425,7 @@ class DatabaseManager:
                 id=int(rid), name=str(name).strip(),
                 brand=str(row[3] or "").strip(),
                 product_name=str(row[4] or "").strip(),
-                energy_kj=_f(row[6]),   energy_kcal=_f(row[7]),
+                energy_kcal=_f(row[6]),  energy_kj=_f(row[7]),
                 fat=_f(row[8]),         saturated_fat=_f(row[9]),
                 carbohydrate=_f(row[10]), sugars=_f(row[11]),
                 fibre=_f(row[12]),      protein=_f(row[13]),
@@ -544,7 +558,8 @@ class DatabaseManager:
             self._safe_write(ws, r, 4, ing.brand or None)
             self._safe_write(ws, r, 5, ing.product_name or None)
             self._safe_write(ws, r, 6, "per 100 g")
-            for c, key in enumerate(NUTRITION_KEYS):
+            # Write nutrition in Excel column order (G=kcal, H=kJ, I=fat, ...)
+            for c, key in enumerate(EXCEL_COL_ORDER):
                 val = getattr(ing, key)
                 self._safe_write(ws, r, 7 + c, val if val else None)
             self._safe_write(ws, r, 16, ing.package_size or None)
@@ -592,7 +607,7 @@ class DatabaseManager:
                 ws2.cell(r, 4).value = mi.amount_grams
                 if ing:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
-                    for c, key in enumerate(NUTRITION_KEYS):
+                    for c, key in enumerate(EXCEL_COL_ORDER):
                         ws2.cell(r, 5 + c).value = nutr[key]
                 # Apply original data style to all written cells in this row
                 for c in range(1, 5 + len(NUTRITION_KEYS)):
@@ -1655,6 +1670,14 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         qa = QAction("Quit", self); qa.setShortcut("Ctrl+Q"); qa.triggered.connect(self.close); fm.addAction(qa)
 
+        # Ctrl+Plus shortcut → open Add dialog for current tab
+        from PySide6.QtGui import QKeySequence, QShortcut
+        add_sc = QShortcut(QKeySequence("Ctrl++"), self)
+        add_sc.activated.connect(self._on_add_shortcut)
+        # Also handle Ctrl+= (Plus without Shift on some keyboards)
+        add_sc2 = QShortcut(QKeySequence("Ctrl+="), self)
+        add_sc2.activated.connect(self._on_add_shortcut)
+
         last = self.settings.value(SETTINGS_LAST_DB, "")
         if last and Path(last).is_file():
             self._open_db(last)
@@ -1697,6 +1720,16 @@ class MainWindow(QMainWindow):
     def _on_tab(self, idx):
         if idx == 1: self.meals_tab._refresh()
         elif idx == 2: self.menus_tab._refresh()
+
+    def _on_add_shortcut(self):
+        """Ctrl+Plus → trigger the Add button on the current tab."""
+        idx = self.tabs.currentIndex()
+        if idx == 0:
+            self.ing_tab._add()
+        elif idx == 1:
+            self.meals_tab._add_ing()
+        elif idx == 2:
+            self.menus_tab._add_item()
 
     def closeEvent(self, event):
         if self.db:
