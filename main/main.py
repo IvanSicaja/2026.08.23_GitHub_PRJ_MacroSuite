@@ -995,7 +995,7 @@ class IngredientPickerDialog(QDialog):
         self.amount_spin = QDoubleSpinBox()
         self.amount_spin.setRange(0.1, 99999); self.amount_spin.setDecimals(1)
         self.amount_spin.setValue(100)
-        lay.addRow("Amount (g)", self.amount_spin)
+        lay.addRow("Weight (g)", self.amount_spin)
 
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary"); cancel.clicked.connect(self.reject)
@@ -1284,7 +1284,7 @@ class MealsTab(QWidget):
     def set_nutrition_order(self, keys, labels):
         self._nutr_keys = keys
         self._nutr_labels = labels
-        cols = ["Ingredient", "Amount (g)"] + labels
+        cols = ["Ingredient", "Weight (g)"] + labels
         self.detail.setColumnCount(len(cols))
         self.detail.setHorizontalHeaderLabels(cols)
 
@@ -1315,13 +1315,13 @@ class MealsTab(QWidget):
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
         self.detail.horizontalHeader().setStretchLastSection(True)
-        cols = ["Ingredient", "Amount (g)"] + NUTRITION_LABELS
+        cols = ["Ingredient", "Weight (g)"] + NUTRITION_LABELS
         self.detail.setColumnCount(len(cols))
         self.detail.setHorizontalHeaderLabels(cols)
         right.addWidget(self.detail)
         rb = QHBoxLayout()
         ai = QPushButton("＋ Add Ingredient"); ai.clicked.connect(self._add_ing)
-        ea = QPushButton("Edit Amount"); ea.setProperty("class", "secondary"); ea.clicked.connect(self._edit_amount)
+        ea = QPushButton("Edit Weight"); ea.setProperty("class", "secondary"); ea.clicked.connect(self._edit_amount)
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_ing)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
@@ -1423,7 +1423,7 @@ class MealsTab(QWidget):
         m = self._cur(); row = self.detail.currentRow()
         if not m or row < 0 or row >= len(m.items): return
         mi = m.items[row]
-        amt, ok = QInputDialog.getDouble(self, "Edit Amount", "Amount (g):", mi.amount_grams, 0.1, 99999, 1)
+        amt, ok = QInputDialog.getDouble(self, "Edit Weight", "Weight (g):", mi.amount_grams, 0.1, 99999, 1)
         if ok: mi.amount_grams = amt; self._refresh(); self.data_changed.emit()
 
     def _remove_ing(self):
@@ -1453,7 +1453,7 @@ class MenusTab(QWidget):
     def set_nutrition_order(self, keys, labels):
         self._nutr_keys = keys
         self._nutr_labels = labels
-        cols = ["Type", "Name", "Amount (g)", "Weight (g)"] + labels
+        cols = ["Type", "Name", "Weight (g)"] + labels
         self.detail.setColumnCount(len(cols))
         self.detail.setHorizontalHeaderLabels(cols)
 
@@ -1484,12 +1484,12 @@ class MenusTab(QWidget):
         self.detail.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.detail.verticalHeader().setVisible(False)
         self.detail.horizontalHeader().setStretchLastSection(True)
-        cols = ["Type", "Name", "Amount", "Weight (g)"] + NUTRITION_LABELS
+        cols = ["Type", "Name", "Weight (g)"] + NUTRITION_LABELS
         self.detail.setColumnCount(len(cols)); self.detail.setHorizontalHeaderLabels(cols)
         right.addWidget(self.detail)
         rb = QHBoxLayout()
         ai = QPushButton("＋ Add Item"); ai.clicked.connect(self._add_item)
-        ea = QPushButton("Edit Amount"); ea.setProperty("class", "secondary"); ea.clicked.connect(self._edit_amount)
+        ea = QPushButton("Edit Weight"); ea.setProperty("class", "secondary"); ea.clicked.connect(self._edit_amount)
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_item)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
@@ -1528,42 +1528,37 @@ class MenusTab(QWidget):
         for r, entry in enumerate(menu.items):
             self.detail.setItem(r, 0, QTableWidgetItem(entry.item_type.capitalize()))
             self.detail.setItem(r, 1, QTableWidgetItem(entry.item_name))
+            self.detail.setItem(r, 2, _num_item(entry.amount))
             kcal_for_color = 0.0
             if entry.item_type == "ingredient":
-                self.detail.setItem(r, 2, _num_item(entry.amount))
-                self.detail.setItem(r, 3, _num_item(entry.amount))
                 ing = _find_ing(entry.item_name, self.ingredients)
                 if ing:
                     kcal_for_color = ing.energy_kcal
                     sc = ing.scaled_nutrition(entry.amount)
                     for c, key in enumerate(nk):
-                        self.detail.setItem(r, 4 + c, _num_item(sc[key]))
+                        self.detail.setItem(r, 3 + c, _num_item(sc[key]))
             else:
-                self.detail.setItem(r, 2, _num_item(entry.amount))
                 meal = self.meals.get(entry.item_name)
                 if meal:
                     mg, mt = NutritionCalc.meal_totals(meal, self.ingredients)
-                    self.detail.setItem(r, 3, _num_item(entry.amount))
                     ratio = entry.amount / mg if mg > 0 else 0
                     for c, key in enumerate(nk):
-                        self.detail.setItem(r, 4 + c, _num_item(round(mt[key] * ratio, 2)))
+                        self.detail.setItem(r, 3 + c, _num_item(round(mt[key] * ratio, 2)))
                     p100 = NutritionCalc.per100(mg, mt)
                     kcal_for_color = p100.get("energy_kcal", 0)
             _color_row_text(self.detail, r, _calorie_text_color(kcal_for_color))
         tg, tt = NutritionCalc.menu_totals(menu, self.meals, self.ingredients)
         self.detail.setItem(ni, 0, _make_total_item("TOTAL", True))
         self.detail.setItem(ni, 1, _make_total_item(""))
-        self.detail.setItem(ni, 2, _make_total_item(""))
-        self.detail.setItem(ni, 3, _make_total_item(_fmt(tg)))
+        self.detail.setItem(ni, 2, _make_total_item(_fmt(tg)))
         for c, key in enumerate(nk):
-            self.detail.setItem(ni, 4 + c, _make_total_item(_fmt(tt[key])))
+            self.detail.setItem(ni, 3 + c, _make_total_item(_fmt(tt[key])))
         p = NutritionCalc.per100(tg, tt)
         self.detail.setItem(ni+1, 0, _make_per100_item("per 100 g", True))
         self.detail.setItem(ni+1, 1, _make_per100_item(""))
-        self.detail.setItem(ni+1, 2, _make_per100_item(""))
-        self.detail.setItem(ni+1, 3, _make_per100_item("100"))
+        self.detail.setItem(ni+1, 2, _make_per100_item("100"))
         for c, key in enumerate(nk):
-            self.detail.setItem(ni+1, 4 + c, _make_per100_item(_fmt(p[key])))
+            self.detail.setItem(ni+1, 3 + c, _make_per100_item(_fmt(p[key])))
         self.detail.resizeColumnsToContents()
 
     def _add_menu(self):
@@ -1617,7 +1612,7 @@ class MenusTab(QWidget):
         m = self._cur(); row = self.detail.currentRow()
         if not m or row < 0 or row >= len(m.items): return
         entry = m.items[row]
-        amt, ok = QInputDialog.getDouble(self, "Edit Amount", "Amount (g):", entry.amount, 0.01, 99999, 2)
+        amt, ok = QInputDialog.getDouble(self, "Edit Weight", "Weight (g):", entry.amount, 0.01, 99999, 2)
         if ok: entry.amount = amt; self._refresh(); self.data_changed.emit()
 
     def _remove_item(self):
