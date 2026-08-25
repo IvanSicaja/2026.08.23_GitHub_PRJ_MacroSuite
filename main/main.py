@@ -478,57 +478,99 @@ class DatabaseManager:
         wb = openpyxl.load_workbook(self.path, data_only=True, read_only=True)
         ws = wb[self.MEALS_SHEET]
         meals: Dict[str, Meal] = OrderedDict()
-        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-        if not header or header[0] != "MealName":
-            for row in ws.iter_rows(min_row=2, max_col=17, values_only=True):
-                n = row[2] if len(row) > 2 else None
-                if n and str(n).strip():
-                    name = str(n).strip()
-                    if name not in meals:
-                        meals[name] = Meal(name=name)
-            wb.close()
-            return meals
-        for row in ws.iter_rows(min_row=2, max_col=4, values_only=True):
-            name = row[0]
-            if not name:
+
+        # Read header to detect columns
+        header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
+        max_col = len(header)
+
+        # New structure: C(2)=MealName, D(3)=IngredientName, G(6)=Basis(amount)
+        for row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+            meal_name = row[2] if len(row) > 2 else None
+            if not meal_name:
                 continue
-            name = str(name).strip()
-            if name not in meals:
-                meals[name] = Meal(name=name)
-            if row[1] is not None and row[3] is not None:
-                meals[name].items.append(
-                    MealIngredient(ingredient_id=int(row[1]), amount_grams=_f(row[3]))
+            meal_name = str(meal_name).strip()
+            if meal_name not in meals:
+                meals[meal_name] = Meal(name=meal_name)
+
+            ing_name = row[3] if len(row) > 3 else None
+            if not ing_name:
+                continue
+            ing_name = str(ing_name).strip()
+
+            # Parse amount from Basis column (col G) e.g. "200 g", "per 100 g"
+            basis = row[6] if len(row) > 6 else None
+            amount = _parse_basis(basis)
+
+            # Find ingredient ID by name
+            # (stored temporarily as -1; resolved against loaded ingredients later)
+            ing_id = self._find_ingredient_id_by_name(ing_name)
+            if ing_id >= 0:
+                meals[meal_name].items.append(
+                    MealIngredient(ingredient_id=ing_id, amount_grams=amount)
                 )
+
         wb.close()
         return meals
 
-    def load_menus(self) -> Dict[str, Menu]:
+    def _find_ingredient_id_by_name(self, name: str) -> int:
+        """Look up ingredient ID by name from the ingredients sheet."""
+        if not hasattr(self, '_ing_name_cache'):
+            self._ing_name_cache = {}
+            wb = openpyxl.load_workbook(self.path, data_only=True, read_only=True)
+            ws = wb[self.INGREDIENTS_SHEET]
+            for row in ws.iter_rows(min_row=2, max_col=4, values_only=True):
+                if row[0] is not None and row[2]:
+                    self._ing_name_cache[str(row[2]).strip().lower()] = int(row[0])
+            wb.close()
+        return self._ing_name_cache.get(name.lower(), -1)
+
+    def load_menus(self, ingredients: Dict[int, Ingredient] = None,
+                   meals: Dict[str, Meal] = None) -> Dict[str, Menu]:
         wb = openpyxl.load_workbook(self.path, data_only=True, read_only=True)
         ws = wb[self.MENUS_SHEET]
         menus: Dict[str, Menu] = OrderedDict()
-        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-        if not header or header[0] != "MenuName":
-            for row in ws.iter_rows(min_row=2, max_col=18, values_only=True):
-                n = row[2] if len(row) > 2 else None
-                if n and str(n).strip():
-                    name = str(n).strip()
-                    if name not in menus:
-                        menus[name] = Menu(name=name)
-            wb.close()
-            return menus
-        for row in ws.iter_rows(min_row=2, max_col=4, values_only=True):
-            name = row[0]
-            if not name:
+
+        header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
+        max_col = len(header)
+
+        # Collect ingredient and meal names for auto-detection
+        ing_names = set()
+        if ingredients:
+            ing_names = {i.name.lower() for i in ingredients.values()}
+        meal_names = set()
+        if meals:
+            meal_names = {n.lower() for n in meals.keys()}
+
+        # New structure: C(2)=MenuName, D(3)=Ingredient/MealName, G(6)=Basis
+        for row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+            menu_name = row[2] if len(row) > 2 else None
+            if not menu_name:
                 continue
-            name = str(name).strip()
-            if name not in menus:
-                menus[name] = Menu(name=name)
-            if row[1] and row[2] and row[3] is not None:
-                menus[name].items.append(MenuEntry(
-                    item_type=str(row[1]).strip().lower(),
-                    item_name=str(row[2]).strip(),
-                    amount=_f(row[3]),
-                ))
+            menu_name = str(menu_name).strip()
+            if menu_name not in menus:
+                menus[menu_name] = Menu(name=menu_name)
+
+            item_name = row[3] if len(row) > 3 else None
+            if not item_name:
+                continue
+            item_name = str(item_name).strip()
+
+            basis = row[6] if len(row) > 6 else None
+            amount = _parse_basis(basis)
+
+            # Auto-detect type: check meals first, then ingredients
+            if item_name.lower() in meal_names:
+                item_type = "meal"
+                amount = amount / 100.0 if amount > 10 else amount  # servings
+            elif item_name.lower() in ing_names:
+                item_type = "ingredient"
+            else:
+                item_type = "ingredient"  # default
+
+            menus[menu_name].items.append(
+                MenuEntry(item_type=item_type, item_name=item_name, amount=amount)
+            )
+
         wb.close()
         return menus
 
@@ -598,7 +640,7 @@ class DatabaseManager:
                     if (old_row, col) in ws._cells:
                         ws._cells[(old_row, col)].value = None
 
-        # ── MEALS: data only, NEVER touch row 1 headers ──
+        # ── MEALS: new structure — C=MealName, D=IngredientName, E=Brand, F=Product, G=Basis, H+=nutrition ──
         ws2 = wb[self.MEALS_SHEET]
         data_style = None
         for (r, c), cell in ws2._cells.items():
@@ -609,24 +651,30 @@ class DatabaseManager:
         r = 2
         for meal in meals.values():
             if not meal.items:
-                ws2.cell(r, 1).value = meal.name
-                self._copy_style_to(ws2, r, 1, data_style)
+                # Empty meal — just write name in col C
+                ws2.cell(r, 3).value = meal.name
+                self._copy_style_to(ws2, r, 3, data_style)
                 r += 1; continue
             for mi in meal.items:
-                ws2.cell(r, 1).value = meal.name
-                ws2.cell(r, 2).value = mi.ingredient_id
                 ing = ingredients.get(mi.ingredient_id)
-                ws2.cell(r, 3).value = ing.name if ing else "?"
-                ws2.cell(r, 4).value = mi.amount_grams
+                ws2.cell(r, 3).value = meal.name                          # C: Meal Name
+                ws2.cell(r, 4).value = ing.name if ing else "?"           # D: Ingredient Name
+                ws2.cell(r, 5).value = (ing.brand if ing else "") or None # E: Brand
+                ws2.cell(r, 6).value = (ing.product_name if ing else "") or None  # F: Product
+                ws2.cell(r, 7).value = f"{mi.amount_grams:.0f} g"        # G: Basis (amount)
                 if ing:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
-                    for c, key in enumerate(NUTRITION_KEYS):
-                        ws2.cell(r, 5 + c).value = nutr[key]
-                for c in range(1, 5 + len(NUTRITION_KEYS)):
+                    # H+ nutrition — detect column order from Meals sheet headers
+                    # Use positions 8-16 (1-based) matching the sheet layout
+                    meal_nutr_cols = [8, 9, 10, 11, 12, 13, 14, 15, 16]
+                    for c, key in zip(meal_nutr_cols, NUTRITION_KEYS):
+                        ws2.cell(r, c).value = nutr.get(key, 0)
+                max_c = max(ws2.max_column or 17, 17)
+                for c in range(1, max_c + 1):
                     self._copy_style_to(ws2, r, c, data_style)
                 r += 1
 
-        # ── MENUS: data only, NEVER touch row 1 headers ──
+        # ── MENUS: new structure — C=MenuName, D=Ingredient/MealName, G=Basis, H+=nutrition ──
         ws3 = wb[self.MENUS_SHEET]
         data_style3 = None
         for (r, c), cell in ws3._cells.items():
@@ -637,15 +685,39 @@ class DatabaseManager:
         r = 2
         for menu in menus.values():
             if not menu.items:
-                ws3.cell(r, 1).value = menu.name
-                self._copy_style_to(ws3, r, 1, data_style3)
+                ws3.cell(r, 3).value = menu.name
+                self._copy_style_to(ws3, r, 3, data_style3)
                 r += 1; continue
             for entry in menu.items:
-                ws3.cell(r, 1).value = menu.name
-                ws3.cell(r, 2).value = entry.item_type
-                ws3.cell(r, 3).value = entry.item_name
-                ws3.cell(r, 4).value = entry.amount
-                for c in range(1, 5):
+                ws3.cell(r, 3).value = menu.name        # C: Menu Name
+                ws3.cell(r, 4).value = entry.item_name  # D: Ingredient/Meal Name
+
+                # Calculate nutrition for this entry
+                nutr = {}
+                weight = 0
+                if entry.item_type == "ingredient":
+                    ing = _find_ing(entry.item_name, ingredients)
+                    if ing:
+                        ws3.cell(r, 5).value = ing.brand or None     # E: Brand
+                        ws3.cell(r, 6).value = ing.product_name or None  # F: Product
+                        ws3.cell(r, 7).value = f"{entry.amount:.0f} g"   # G: Basis
+                        nutr = ing.scaled_nutrition(entry.amount)
+                        weight = entry.amount
+                elif entry.item_type == "meal":
+                    meal = meals.get(entry.item_name)
+                    if meal:
+                        mg, mt = NutritionCalc.meal_totals(meal, ingredients)
+                        ws3.cell(r, 7).value = f"{entry.amount:.1f} x"  # G: servings
+                        nutr = {k: mt[k] * entry.amount for k in NUTRITION_KEYS}
+                        weight = mg * entry.amount
+
+                # Write nutrition H+ (cols 8-16, 1-based)
+                menu_nutr_cols = [8, 9, 10, 11, 12, 13, 14, 15, 16]
+                for c, key in zip(menu_nutr_cols, NUTRITION_KEYS):
+                    ws3.cell(r, c).value = round(nutr.get(key, 0), 2)
+
+                max_c = max(ws3.max_column or 17, 17)
+                for c in range(1, max_c + 1):
                     self._copy_style_to(ws3, r, c, data_style3)
                 r += 1
 
@@ -672,6 +744,17 @@ def _f(val) -> float:
             return float(str(val).replace(",", ".").strip())
         except (ValueError, TypeError):
             return 0.0
+
+
+def _parse_basis(basis) -> float:
+    """Extract grams from basis string like 'per 100 g', '200 g', '50'."""
+    if basis is None:
+        return 100.0
+    import re
+    nums = re.findall(r'[\d.]+', str(basis))
+    if nums:
+        return float(nums[-1])
+    return 100.0
 
 
 # ━━━━━━━━━━━━━━━━━━ NUTRITION CALC ━━━━━━━━━━━━━━━━━━━━
@@ -859,40 +942,58 @@ class IngredientDialog(QDialog):
 
 
 class IngredientPickerDialog(QDialog):
-    def __init__(self, parent, ingredients):
+    """Unified picker for ingredients (and optionally meals).
+    Used by BOTH Meals and Menus tabs — 100% identical appearance.
+    Field order: Name → Brand → Product (auto) → Amount (g)."""
+
+    def __init__(self, parent, ingredients, meals=None):
         super().__init__(parent)
         self.setWindowTitle("Select Ingredient")
         self.setMinimumWidth(520)
         self.ingredients = ingredients
-        self._all = sorted(ingredients.values(), key=lambda i: i.name.lower())
+        self._all_ings = sorted(ingredients.values(), key=lambda i: i.name.lower())
+        self._meals = meals or {}
+        self._meal_names = sorted(self._meals.keys())
+
         lay = QFormLayout(self)
         lay.setSpacing(12); lay.setContentsMargins(24, 24, 24, 24)
-        self.brand_combo = QComboBox()
-        self.brand_combo.setEditable(True)
-        self.brand_combo.setInsertPolicy(QComboBox.NoInsert)
-        brands = sorted(set(i.brand for i in self._all if i.brand))
-        self.brand_combo.addItem("— All brands —")
-        self.brand_combo.addItems(brands)
-        self._set_completer(self.brand_combo, ["— All brands —"] + brands)
-        self.brand_combo.currentIndexChanged.connect(self._on_brand)
-        lay.addRow("Brand", self.brand_combo)
+
+        # 1. NAME (includes [Meal] entries when meals are provided)
         self.name_combo = QComboBox()
         self.name_combo.setEditable(True)
         self.name_combo.setInsertPolicy(QComboBox.NoInsert)
         self.name_combo.currentIndexChanged.connect(self._on_name)
         lay.addRow("Name", self.name_combo)
+
+        # 2. BRAND (filters ingredient names)
+        self.brand_combo = QComboBox()
+        self.brand_combo.setEditable(True)
+        self.brand_combo.setInsertPolicy(QComboBox.NoInsert)
+        brands = sorted(set(i.brand for i in self._all_ings if i.brand))
+        self.brand_combo.addItem("— All brands —")
+        self.brand_combo.addItems(brands)
+        self._set_completer(self.brand_combo, ["— All brands —"] + brands)
+        self.brand_combo.currentIndexChanged.connect(self._on_brand)
+        lay.addRow("Brand", self.brand_combo)
+
+        # 3. PRODUCT (read-only, auto-filled)
         self.product_label = QLineEdit("")
         self.product_label.setReadOnly(True)
         self.product_label.setStyleSheet(f"background: {C_BG}; color: {C_TEXT2}; border: 1px solid {C_BORDER};")
         lay.addRow("Product", self.product_label)
+
+        # 4. AMOUNT (always grams)
         self.amount_spin = QDoubleSpinBox()
-        self.amount_spin.setRange(0.1, 99999); self.amount_spin.setDecimals(1); self.amount_spin.setValue(100)
+        self.amount_spin.setRange(0.1, 99999); self.amount_spin.setDecimals(1)
+        self.amount_spin.setValue(100)
         lay.addRow("Amount (g)", self.amount_spin)
+
         btns = QHBoxLayout(); btns.addStretch()
         cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary"); cancel.clicked.connect(self.reject)
         add = QPushButton("Add"); add.clicked.connect(self.accept); add.setDefault(True)
         btns.addWidget(cancel); btns.addWidget(add)
         lay.addRow(btns)
+
         self._populate_names()
 
     @staticmethod
@@ -904,125 +1005,66 @@ class IngredientPickerDialog(QDialog):
             f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;")
         combo.setCompleter(c)
 
-    def _filtered(self):
+    def _filtered_ings(self):
         bt = self.brand_combo.currentText().strip()
-        if bt == "— All brands —" or not bt: return self._all
-        bl = bt.lower()
-        return [i for i in self._all if i.brand.lower() == bl]
+        if bt == "— All brands —" or not bt:
+            return self._all_ings
+        return [i for i in self._all_ings if i.brand.lower() == bt.lower()]
 
     def _populate_names(self):
-        self.name_combo.blockSignals(True); self.name_combo.clear()
-        names = [i.name for i in self._filtered()]
-        self.name_combo.addItems(names)
-        self._set_completer(self.name_combo, names)
+        self.name_combo.blockSignals(True)
+        self.name_combo.clear()
+        self._name_items = []  # (display_text, type, key_name)
+        # Meals first (if provided)
+        for mn in self._meal_names:
+            self._name_items.append((f"[Meal]  {mn}", "meal", mn))
+        # Filtered ingredients
+        for ing in self._filtered_ings():
+            self._name_items.append((ing.name, "ingredient", ing.name))
+        display = [it[0] for it in self._name_items]
+        self.name_combo.addItems(display)
+        self._set_completer(self.name_combo, display)
         self.name_combo.blockSignals(False)
-        if names: self.name_combo.setCurrentIndex(0); self._on_name(0)
+        if display:
+            self.name_combo.setCurrentIndex(0)
+            self._on_name(0)
 
-    def _on_brand(self, idx): self._populate_names()
+    def _on_brand(self, idx):
+        self._populate_names()
+
     def _on_name(self, idx):
-        nt = self.name_combo.currentText().strip()
-        for ing in self._all:
-            if ing.name == nt: self.product_label.setText(ing.product_name or "—"); return
-        self.product_label.setText("—")
+        if 0 <= idx < len(self._name_items):
+            _, itype, name = self._name_items[idx]
+            if itype == "meal":
+                self.product_label.setText("(Meal)")
+            else:
+                for ing in self._all_ings:
+                    if ing.name == name:
+                        self.product_label.setText(ing.product_name or "—")
+                        return
+                self.product_label.setText("—")
+        else:
+            self.product_label.setText("—")
 
     def get_result(self):
-        nt = self.name_combo.currentText().strip()
-        for ing in self._all:
-            if ing.name == nt: return ing.id, self.amount_spin.value()
+        text = self.name_combo.currentText().strip()
+        amount = self.amount_spin.value()
+        # Match against name items
+        for display, itype, name in self._name_items:
+            if display == text or name.lower() == text.lower():
+                if itype == "meal":
+                    return MenuEntry("meal", name, amount)
+                else:
+                    for ing in self._all_ings:
+                        if ing.name == name:
+                            return (ing.id, amount)
+                    break
+        # Fallback: direct ingredient name match
+        for ing in self._all_ings:
+            if ing.name.lower() == text.lower():
+                return (ing.id, amount)
         return None
 
-
-class AddMenuItemDialog(QDialog):
-    def __init__(self, parent, ingredients, meals):
-        super().__init__(parent)
-        self.setWindowTitle("Add Item to Menu"); self.setMinimumWidth(520)
-        self.ingredients = ingredients; self.meals = meals
-        self._all_ings = sorted(ingredients.values(), key=lambda i: i.name.lower())
-        lay = QFormLayout(self)
-        lay.setSpacing(12); lay.setContentsMargins(24, 24, 24, 24)
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Ingredient", "Meal"])
-        self.type_combo.currentIndexChanged.connect(self._on_type)
-        lay.addRow("Type", self.type_combo)
-        self.brand_combo = QComboBox(); self.brand_combo.setEditable(True)
-        self.brand_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.brand_combo.currentIndexChanged.connect(self._on_brand)
-        self.brand_lbl = QLabel("Brand"); lay.addRow(self.brand_lbl, self.brand_combo)
-        self.name_combo = QComboBox(); self.name_combo.setEditable(True)
-        self.name_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.name_combo.currentIndexChanged.connect(self._on_name)
-        self.name_lbl = QLabel("Name"); lay.addRow(self.name_lbl, self.name_combo)
-        self.product_field = QLineEdit(""); self.product_field.setReadOnly(True)
-        self.product_field.setStyleSheet(f"background: {C_BG}; color: {C_TEXT2}; border: 1px solid {C_BORDER};")
-        self.product_lbl = QLabel("Product"); lay.addRow(self.product_lbl, self.product_field)
-        self.meal_combo = QComboBox(); self.meal_combo.setEditable(True)
-        self.meal_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.meal_lbl = QLabel("Meal"); lay.addRow(self.meal_lbl, self.meal_combo)
-        self.amount_spin = QDoubleSpinBox()
-        self.amount_spin.setRange(0.01, 99999); self.amount_spin.setDecimals(1); self.amount_spin.setValue(100)
-        self.amount_lbl_w = QLabel("Amount (g)"); lay.addRow(self.amount_lbl_w, self.amount_spin)
-        btns = QHBoxLayout(); btns.addStretch()
-        cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary"); cancel.clicked.connect(self.reject)
-        add = QPushButton("Add"); add.clicked.connect(self.accept); add.setDefault(True)
-        btns.addWidget(cancel); btns.addWidget(add)
-        lay.addRow(btns)
-        self._on_type(0)
-
-    @staticmethod
-    def _set_completer(combo, items):
-        c = QCompleter(items)
-        c.setCaseSensitivity(Qt.CaseInsensitive); c.setFilterMode(Qt.MatchContains)
-        c.popup().setStyleSheet(
-            f"background: #3a3a3c; color: {C_TEXT}; border: 1px solid {C_BORDER2};"
-            f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;")
-        combo.setCompleter(c)
-
-    def _on_type(self, idx):
-        is_ing = idx == 0
-        for w in (self.brand_combo, self.brand_lbl, self.name_combo, self.name_lbl, self.product_field, self.product_lbl):
-            w.setVisible(is_ing)
-        self.meal_combo.setVisible(not is_ing); self.meal_lbl.setVisible(not is_ing)
-        if is_ing:
-            self.amount_lbl_w.setText("Amount (g)"); self.amount_spin.setValue(100); self._populate_brands()
-        else:
-            self.amount_lbl_w.setText("Servings (×)"); self.amount_spin.setValue(1.0)
-            self.meal_combo.clear()
-            names = sorted(self.meals.keys()); self.meal_combo.addItems(names)
-            self._set_completer(self.meal_combo, names)
-
-    def _populate_brands(self):
-        self.brand_combo.blockSignals(True); self.brand_combo.clear()
-        brands = sorted(set(i.brand for i in self._all_ings if i.brand))
-        self.brand_combo.addItem("— All brands —"); self.brand_combo.addItems(brands)
-        self._set_completer(self.brand_combo, ["— All brands —"] + brands)
-        self.brand_combo.blockSignals(False); self._populate_names()
-
-    def _on_brand(self, idx): self._populate_names()
-    def _populate_names(self):
-        self.name_combo.blockSignals(True); self.name_combo.clear()
-        bt = self.brand_combo.currentText().strip()
-        filtered = self._all_ings if bt in ("— All brands —", "") else [i for i in self._all_ings if i.brand.lower() == bt.lower()]
-        names = [i.name for i in filtered]; self.name_combo.addItems(names)
-        self._set_completer(self.name_combo, names)
-        self.name_combo.blockSignals(False)
-        if names: self.name_combo.setCurrentIndex(0); self._on_name(0)
-
-    def _on_name(self, idx):
-        nt = self.name_combo.currentText().strip()
-        for ing in self._all_ings:
-            if ing.name == nt: self.product_field.setText(ing.product_name or "—"); return
-        self.product_field.setText("—")
-
-    def get_result(self):
-        if self.type_combo.currentIndex() == 0:
-            nt = self.name_combo.currentText().strip()
-            for ing in self._all_ings:
-                if ing.name == nt: return MenuEntry("ingredient", ing.name, self.amount_spin.value())
-            QMessageBox.warning(self, "Not Found", f"Ingredient '{nt}' not found."); return None
-        else:
-            mt = self.meal_combo.currentText().strip()
-            if mt not in self.meals: QMessageBox.warning(self, "Not Found", f"Meal '{mt}' not found."); return None
-            return MenuEntry("meal", mt, self.amount_spin.value())
 
 
 # ━━━━━━━━━━━━━━━━━ INGREDIENTS TAB ━━━━━━━━━━━━━━━━━━━
@@ -1308,7 +1350,9 @@ class MealsTab(QWidget):
         d = IngredientPickerDialog(self, self.ingredients)
         if d.exec() == QDialog.Accepted:
             r = d.get_result()
-            if r: m.items.append(MealIngredient(ingredient_id=r[0], amount_grams=r[1])); self._refresh(); self.data_changed.emit()
+            if r and isinstance(r, tuple):
+                m.items.append(MealIngredient(ingredient_id=r[0], amount_grams=r[1]))
+                self._refresh(); self.data_changed.emit()
 
     def _edit_amount(self):
         m = self._cur(); row = self.detail.currentRow()
@@ -1477,17 +1521,32 @@ class MenusTab(QWidget):
     def _add_item(self):
         m = self._cur()
         if not m: QMessageBox.information(self, "No Menu", "Select or create a menu first."); return
-        d = AddMenuItemDialog(self, self.ingredients, self.meals)
+        d = IngredientPickerDialog(self, self.ingredients, meals=self.meals)
         if d.exec() == QDialog.Accepted:
-            e = d.get_result()
-            if e: m.items.append(e); self._refresh(); self.data_changed.emit()
+            result = d.get_result()
+            if result is None:
+                return
+            if isinstance(result, MenuEntry):
+                # Meal selected — amount in grams, convert to servings
+                meal = self.meals.get(result.item_name)
+                if meal:
+                    mg, _ = NutritionCalc.meal_totals(meal, self.ingredients)
+                    servings = result.amount / mg if mg > 0 else 1.0
+                    result = MenuEntry("meal", result.item_name, round(servings, 2))
+                m.items.append(result)
+            else:
+                # Ingredient: result = (ing_id, amount)
+                ing_id, amount = result
+                ing = self.ingredients.get(ing_id)
+                if ing:
+                    m.items.append(MenuEntry("ingredient", ing.name, amount))
+            self._refresh(); self.data_changed.emit()
 
     def _edit_amount(self):
         m = self._cur(); row = self.detail.currentRow()
         if not m or row < 0 or row >= len(m.items): return
         entry = m.items[row]
-        label = "Amount (g):" if entry.item_type == "ingredient" else "Servings (×):"
-        amt, ok = QInputDialog.getDouble(self, "Edit Amount", label, entry.amount, 0.01, 99999, 2)
+        amt, ok = QInputDialog.getDouble(self, "Edit Amount", "Amount (g):", entry.amount, 0.01, 99999, 2)
         if ok: entry.amount = amt; self._refresh(); self.data_changed.emit()
 
     def _remove_item(self):
@@ -1579,8 +1638,9 @@ class MainWindow(QMainWindow):
                 self.ing_tab.set_headers(ing_headers, self.db._col_map)
 
             self.ing_tab.load(ingredients)
-            self.meals_tab.load(self.db.load_meals())
-            self.menus_tab.load(self.db.load_menus())
+            loaded_meals = self.db.load_meals()
+            self.meals_tab.load(loaded_meals)
+            self.menus_tab.load(self.db.load_menus(ingredients, loaded_meals))
             display = path if len(path) <= 65 else str(Path(Path(path).parts[0], "…", *Path(path).parts[-2:]))
             self.db_path_label.setText(display); self.db_path_label.setToolTip(path)
             self.db_icon.setStyleSheet(f"font-size: 16px; color: {C_GREEN}; background: transparent;")
