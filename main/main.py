@@ -1006,11 +1006,32 @@ class IngredientPickerDialog(QDialog):
         self._populate_names()
 
         # Start with empty name field, placeholder, and focus
+        self._auto_skip = False  # set True when unique ingredient detected
         self.name_combo.setCurrentText("")
         self.name_combo.lineEdit().setPlaceholderText("e.g. Chicken breast")
+        self.name_combo.lineEdit().installEventFilter(self)
         self.brand_combo.clear()
         self.product_combo.clear()
         QTimer.singleShot(0, lambda: self.name_combo.setFocus())
+
+    def eventFilter(self, obj, event):
+        """Skip to Amount only when user confirms name with Tab or Enter."""
+        if obj == self.name_combo.lineEdit() and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Tab, Qt.Key_Return, Qt.Key_Enter):
+                # Accept completer selection first
+                comp = self.name_combo.completer()
+                if comp and comp.popup() and comp.popup().isVisible():
+                    idx = comp.popup().currentIndex()
+                    if idx.isValid():
+                        self.name_combo.setCurrentText(idx.data())
+                    comp.popup().hide()
+                # Skip to Amount if auto-fill is complete
+                if self._auto_skip:
+                    QTimer.singleShot(50, self.amount_spin.setFocus)
+                    QTimer.singleShot(60, self.amount_spin.selectAll)
+                    if event.key() == Qt.Key_Tab:
+                        return True
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _set_completer(combo, items):
@@ -1037,6 +1058,7 @@ class IngredientPickerDialog(QDialog):
     def _on_name_changed(self, text):
         """When name changes, auto-fill Brand and Branded Product Name."""
         text = text.strip()
+        self._auto_skip = False
         self.brand_combo.blockSignals(True)
         self.product_combo.blockSignals(True)
         self.brand_combo.clear()
@@ -1049,7 +1071,7 @@ class IngredientPickerDialog(QDialog):
                 self.product_combo.addItem("Homemade Food")
                 self.brand_combo.blockSignals(False)
                 self.product_combo.blockSignals(False)
-                QTimer.singleShot(0, self.amount_spin.setFocus)
+                self._auto_skip = True  # will skip on Tab/Enter
                 return
 
         # Find all ingredients matching this name
@@ -1065,16 +1087,15 @@ class IngredientPickerDialog(QDialog):
         if matching:
             brands = list(dict.fromkeys((i.brand or "") for i in matching))
             products = list(dict.fromkeys((i.product_name or "") for i in matching))
-            # Replace empty strings with clean placeholders
             brands = [b if b else "No brand" for b in brands]
             products = [p if p else "Whole food" for p in products]
             self.brand_combo.addItems(brands)
             self._set_completer(self.brand_combo, brands)
             self.product_combo.addItems(products)
             self._set_completer(self.product_combo, products)
-            # Auto-skip: if unique (single brand+product), jump to Amount
+            # Flag auto-skip if unique (single brand+product)
             if len(matching) == 1:
-                QTimer.singleShot(0, self.amount_spin.setFocus)
+                self._auto_skip = True
         else:
             self.brand_combo.addItem("")
             self.product_combo.addItem("")
