@@ -418,6 +418,22 @@ class DatabaseManager:
     def _get_col(self, field: str) -> int:
         return self._col_map.get(field, -1)
 
+    def _detect_sheet_nutrition_cols(self, ws) -> Dict[str, int]:
+        """Detect nutrition column positions from a sheet's header row.
+        Returns {field_name: 1-based_column_index}."""
+        result = {}
+        for (r, c), cell in ws._cells.items():
+            if r == 1 and cell.value:
+                hl = str(cell.value).lower()
+                for kw, fld in self._NUTRITION_DETECT.items():
+                    if kw in hl and fld not in result:
+                        result[fld] = c; break
+                else:
+                    for kw, fld in self._NUTRITION_DETECT_ORDERED:
+                        if kw in hl and fld not in result:
+                            result[fld] = c; break
+        return result
+
     @property
     def nutrition_display_order(self) -> List[str]:
         """Nutrition keys sorted by database column position."""
@@ -493,36 +509,35 @@ class DatabaseManager:
         ws = wb[self.MEALS_SHEET]
         meals: Dict[str, Meal] = OrderedDict()
 
-        # Read header to detect columns
         header = list(next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ()))
         max_col = len(header)
 
-        # New structure: C(2)=MealName, D(3)=IngredientName, G(6)=Basis(amount)
+        # Detect weight column (look for "weight" in headers)
+        weight_col = 6  # default G
+        for i, h in enumerate(header):
+            if h and "weight" in str(h).lower():
+                weight_col = i; break
+
+        # C(2)=MealName, D(3)=IngredientName, weight_col=Weight
         for row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
             meal_name = row[2] if len(row) > 2 else None
-            if not meal_name:
-                continue
+            if not meal_name: continue
             meal_name = str(meal_name).strip()
             if meal_name not in meals:
                 meals[meal_name] = Meal(name=meal_name)
 
             ing_name = row[3] if len(row) > 3 else None
-            if not ing_name:
-                continue
+            if not ing_name: continue
             ing_name = str(ing_name).strip()
 
-            # Parse amount from Basis column (col G) e.g. "200 g", "per 100 g"
-            basis = row[6] if len(row) > 6 else None
-            amount = _parse_basis(basis)
+            weight_val = row[weight_col] if len(row) > weight_col else None
+            amount = _parse_basis(weight_val)
 
-            # Find ingredient ID by name
-            # (stored temporarily as -1; resolved against loaded ingredients later)
             ing_id = self._find_ingredient_id_by_name(ing_name)
             if ing_id >= 0:
                 meals[meal_name].items.append(
                     MealIngredient(ingredient_id=ing_id, amount_grams=amount)
                 )
-
         wb.close()
         return meals
 
@@ -653,47 +668,49 @@ class DatabaseManager:
                     if (old_row, col) in ws._cells:
                         ws._cells[(old_row, col)].value = None
 
-        # ── MEALS: new structure — C=MealName, D=IngredientName, E=Brand, F=Product, G=Basis, H+=nutrition ──
+        # ── MEALS: C=MealName, D=IngredientName, E=Brand, F=Product, G=Weight, H+=nutrition ──
         ws2 = wb[self.MEALS_SHEET]
+
+        # Detect nutrition column order from Meals sheet headers
+        meals_nutr_map = self._detect_sheet_nutrition_cols(ws2)
+
         data_style = None
         for (r, c), cell in ws2._cells.items():
             if r >= 2:
-                data_style = cell._style
-                break
+                data_style = cell._style; break
         self._clear_existing_data(ws2, min_row=2)
         r = 2
         for meal in meals.values():
             if not meal.items:
-                # Empty meal — just write name in col C
                 ws2.cell(r, 3).value = meal.name
                 self._copy_style_to(ws2, r, 3, data_style)
                 r += 1; continue
             for mi in meal.items:
                 ing = ingredients.get(mi.ingredient_id)
-                ws2.cell(r, 3).value = meal.name                          # C: Meal Name
-                ws2.cell(r, 4).value = ing.name if ing else "?"           # D: Ingredient Name
-                ws2.cell(r, 5).value = (ing.brand if ing else "") or None # E: Brand
-                ws2.cell(r, 6).value = (ing.product_name if ing else "") or None  # F: Product
-                ws2.cell(r, 7).value = f"{mi.amount_grams:.0f} g"        # G: Basis (amount)
+                ws2.cell(r, 3).value = meal.name
+                ws2.cell(r, 4).value = ing.name if ing else "?"
+                ws2.cell(r, 5).value = (ing.brand if ing else "") or None
+                ws2.cell(r, 6).value = (ing.product_name if ing else "") or None
+                ws2.cell(r, 7).value = f"{mi.amount_grams:.0f} g"
                 if ing:
                     nutr = ing.scaled_nutrition(mi.amount_grams)
-                    # H+ nutrition — detect column order from Meals sheet headers
-                    # Use positions 8-16 (1-based) matching the sheet layout
-                    meal_nutr_cols = [8, 9, 10, 11, 12, 13, 14, 15, 16]
-                    for c, key in zip(meal_nutr_cols, NUTRITION_KEYS):
-                        ws2.cell(r, c).value = nutr.get(key, 0)
+                    for field, col_1based in meals_nutr_map.items():
+                        ws2.cell(r, col_1based).value = round(nutr.get(field, 0), 2)
                 max_c = max(ws2.max_column or 17, 17)
                 for c in range(1, max_c + 1):
                     self._copy_style_to(ws2, r, c, data_style)
                 r += 1
 
-        # ── MENUS: new structure — C=MenuName, D=Ingredient/MealName, G=Basis, H+=nutrition ──
+        # ── MENUS: C=MenuName, D=Ingredient/MealName, E=Brand, F=Product, G=Weight, H+=nutrition ──
         ws3 = wb[self.MENUS_SHEET]
+
+        # Detect nutrition column order from Menus sheet headers
+        menus_nutr_map = self._detect_sheet_nutrition_cols(ws3)
+
         data_style3 = None
         for (r, c), cell in ws3._cells.items():
             if r >= 2:
-                data_style3 = cell._style
-                break
+                data_style3 = cell._style; break
         self._clear_existing_data(ws3, min_row=2)
         r = 2
         for menu in menus.values():
@@ -702,12 +719,10 @@ class DatabaseManager:
                 self._copy_style_to(ws3, r, 3, data_style3)
                 r += 1; continue
             for entry in menu.items:
-                ws3.cell(r, 3).value = menu.name        # C: Menu Name
-                ws3.cell(r, 4).value = entry.item_name  # D: Ingredient/Meal Name
+                ws3.cell(r, 3).value = menu.name
+                ws3.cell(r, 4).value = entry.item_name
 
-                # Calculate nutrition for this entry
                 nutr = {}
-                weight = 0
                 if entry.item_type == "ingredient":
                     ing = _find_ing(entry.item_name, ingredients)
                     if ing:
@@ -716,17 +731,15 @@ class DatabaseManager:
                         ws3.cell(r, 7).value = f"{entry.amount:.0f} g"
                         nutr = ing.scaled_nutrition(entry.amount)
                 elif entry.item_type == "meal":
-                    meal = meals.get(entry.item_name)
-                    if meal:
+                    meal_obj = meals.get(entry.item_name)
+                    if meal_obj:
                         ws3.cell(r, 7).value = f"{entry.amount:.0f} g"
-                        mg, mt = NutritionCalc.meal_totals(meal, ingredients)
+                        mg, mt = NutritionCalc.meal_totals(meal_obj, ingredients)
                         ratio = entry.amount / mg if mg > 0 else 0
                         nutr = {k: mt[k] * ratio for k in NUTRITION_KEYS}
 
-                # Write nutrition H+ (cols 8-16, 1-based)
-                menu_nutr_cols = [8, 9, 10, 11, 12, 13, 14, 15, 16]
-                for c, key in zip(menu_nutr_cols, NUTRITION_KEYS):
-                    ws3.cell(r, c).value = round(nutr.get(key, 0), 2)
+                for field, col_1based in menus_nutr_map.items():
+                    ws3.cell(r, col_1based).value = round(nutr.get(field, 0), 2)
 
                 max_c = max(ws3.max_column or 17, 17)
                 for c in range(1, max_c + 1):
