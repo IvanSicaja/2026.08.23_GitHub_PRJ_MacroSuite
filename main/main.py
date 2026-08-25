@@ -416,8 +416,22 @@ class DatabaseManager:
             }
 
     def _get_col(self, field: str) -> int:
-        """Get 0-based column index for a field, or -1 if not found."""
         return self._col_map.get(field, -1)
+
+    @property
+    def nutrition_display_order(self) -> List[str]:
+        """Nutrition keys sorted by database column position."""
+        ordered = sorted(
+            [(idx, k) for k, idx in self._col_map.items() if k in set(NUTRITION_KEYS)],
+            key=lambda x: x[0]
+        )
+        return [k for _, k in ordered] if ordered else NUTRITION_KEYS
+
+    @property
+    def nutrition_display_labels(self) -> List[str]:
+        """Nutrition labels in database column order."""
+        label_map = dict(NUTRITION_FIELDS)
+        return [label_map.get(k, k) for k in self.nutrition_display_order]
 
     # ── Read headers exactly from database ──
 
@@ -958,7 +972,7 @@ class IngredientPickerDialog(QDialog):
         lay = QFormLayout(self)
         lay.setSpacing(12); lay.setContentsMargins(24, 24, 24, 24)
 
-        # 1. NAME
+        # 1. NAME — prefixed with [Ingredient] or [Meal]
         self.name_combo = QComboBox()
         self.name_combo.setEditable(True)
         self.name_combo.setInsertPolicy(QComboBox.NoInsert)
@@ -1007,7 +1021,7 @@ class IngredientPickerDialog(QDialog):
         for mn in self._meal_names:
             self._name_items.append((f"[Meal]  {mn}", "meal", mn))
         for ing in self._all_ings:
-            self._name_items.append((ing.name, "ingredient", ing.name))
+            self._name_items.append((f"[Ingredient]  {ing.name}", "ingredient", ing.name))
         display = [it[0] for it in self._name_items]
         self.name_combo.addItems(display)
         self._set_completer(self.name_combo, display)
@@ -1027,30 +1041,33 @@ class IngredientPickerDialog(QDialog):
         # Check if it's a meal
         for display, itype, name in self._name_items:
             if (display == text or name == text) and itype == "meal":
-                self.brand_combo.addItem("")
+                self.brand_combo.addItem("Homemade Food")
                 self.product_combo.addItem("Homemade Food")
                 self.brand_combo.blockSignals(False)
                 self.product_combo.blockSignals(False)
+                QTimer.singleShot(0, self.amount_spin.setFocus)
                 return
 
         # Find all ingredients matching this name
-        matching = [i for i in self._all_ings if i.name.lower() == text.lower()]
+        matching = []
+        for display, itype, name in self._name_items:
+            if (display == text or name.lower() == text.lower() or
+                text.lower().endswith(name.lower())) and itype == "ingredient":
+                matching = [i for i in self._all_ings if i.name == name]
+                break
         if not matching:
-            # Try partial match from display text
-            for display, itype, name in self._name_items:
-                if display == text and itype == "ingredient":
-                    matching = [i for i in self._all_ings if i.name == name]
-                    break
+            matching = [i for i in self._all_ings if i.name.lower() == text.lower()]
 
         if matching:
-            # Collect unique brands and products
             brands = list(dict.fromkeys(i.brand or "" for i in matching))
             products = list(dict.fromkeys(i.product_name or "" for i in matching))
-
             self.brand_combo.addItems(brands)
             self._set_completer(self.brand_combo, brands)
             self.product_combo.addItems(products)
             self._set_completer(self.product_combo, products)
+            # Auto-skip: if unique (single brand+product), jump to Amount
+            if len(matching) == 1:
+                QTimer.singleShot(0, self.amount_spin.setFocus)
         else:
             self.brand_combo.addItem("")
             self.product_combo.addItem("")
@@ -1229,10 +1246,19 @@ class MealsTab(QWidget):
     def __init__(self, ing_tab):
         super().__init__()
         self.ing_tab = ing_tab; self.meals: Dict[str, Meal] = {}
+        self._nutr_keys = NUTRITION_KEYS      # updated from DB
+        self._nutr_labels = NUTRITION_LABELS
         self._build()
 
     @property
     def ingredients(self): return self.ing_tab.ingredients
+
+    def set_nutrition_order(self, keys, labels):
+        self._nutr_keys = keys
+        self._nutr_labels = labels
+        cols = ["Ingredient", "Amount (g)"] + labels
+        self.detail.setColumnCount(len(cols))
+        self.detail.setHorizontalHeaderLabels(cols)
 
     def _build(self):
         lay = QHBoxLayout(self)
@@ -1303,6 +1329,7 @@ class MealsTab(QWidget):
         meal = self._cur()
         if not meal: return
         n = len(meal.items)
+        nk = self._nutr_keys
         self.detail.setSortingEnabled(False)
         self.detail.setRowCount(n + 2)
         for r, mi in enumerate(meal.items):
@@ -1311,18 +1338,18 @@ class MealsTab(QWidget):
             self.detail.setItem(r, 1, _num_item(mi.amount_grams))
             if ing:
                 sc = ing.scaled_nutrition(mi.amount_grams)
-                for c, key in enumerate(NUTRITION_KEYS):
+                for c, key in enumerate(nk):
                     self.detail.setItem(r, 2 + c, _num_item(sc[key]))
                 _color_row_text(self.detail, r, _calorie_text_color(ing.energy_kcal))
         tg, tt = NutritionCalc.meal_totals(meal, self.ingredients)
         self.detail.setItem(n, 0, _make_total_item("TOTAL", True))
         self.detail.setItem(n, 1, _make_total_item(_fmt(tg)))
-        for c, key in enumerate(NUTRITION_KEYS):
+        for c, key in enumerate(nk):
             self.detail.setItem(n, 2 + c, _make_total_item(_fmt(tt[key])))
         p = NutritionCalc.per100(tg, tt)
         self.detail.setItem(n+1, 0, _make_per100_item("per 100 g", True))
         self.detail.setItem(n+1, 1, _make_per100_item("100"))
-        for c, key in enumerate(NUTRITION_KEYS):
+        for c, key in enumerate(nk):
             self.detail.setItem(n+1, 2 + c, _make_per100_item(_fmt(p[key])))
         self.detail.resizeColumnsToContents()
 
@@ -1386,12 +1413,21 @@ class MenusTab(QWidget):
         super().__init__()
         self.ing_tab = ing_tab; self.meals_tab = meals_tab
         self.menus: Dict[str, Menu] = {}
+        self._nutr_keys = NUTRITION_KEYS
+        self._nutr_labels = NUTRITION_LABELS
         self._build()
 
     @property
     def ingredients(self): return self.ing_tab.ingredients
     @property
     def meals(self): return self.meals_tab.meals
+
+    def set_nutrition_order(self, keys, labels):
+        self._nutr_keys = keys
+        self._nutr_labels = labels
+        cols = ["Type", "Name", "Amount (g)", "Weight (g)"] + labels
+        self.detail.setColumnCount(len(cols))
+        self.detail.setHorizontalHeaderLabels(cols)
 
     def _build(self):
         lay = QHBoxLayout(self)
@@ -1459,6 +1495,7 @@ class MenusTab(QWidget):
         menu = self._cur()
         if not menu: return
         ni = len(menu.items)
+        nk = self._nutr_keys
         self.detail.setSortingEnabled(False); self.detail.setRowCount(ni + 2)
         for r, entry in enumerate(menu.items):
             self.detail.setItem(r, 0, QTableWidgetItem(entry.item_type.capitalize()))
@@ -1471,7 +1508,7 @@ class MenusTab(QWidget):
                 if ing:
                     kcal_for_color = ing.energy_kcal
                     sc = ing.scaled_nutrition(entry.amount)
-                    for c, key in enumerate(NUTRITION_KEYS):
+                    for c, key in enumerate(nk):
                         self.detail.setItem(r, 4 + c, _num_item(sc[key]))
             else:
                 self.detail.setItem(r, 2, _num_item(entry.amount))
@@ -1480,7 +1517,7 @@ class MenusTab(QWidget):
                     mg, mt = NutritionCalc.meal_totals(meal, self.ingredients)
                     self.detail.setItem(r, 3, _num_item(entry.amount))
                     ratio = entry.amount / mg if mg > 0 else 0
-                    for c, key in enumerate(NUTRITION_KEYS):
+                    for c, key in enumerate(nk):
                         self.detail.setItem(r, 4 + c, _num_item(round(mt[key] * ratio, 2)))
                     p100 = NutritionCalc.per100(mg, mt)
                     kcal_for_color = p100.get("energy_kcal", 0)
@@ -1490,14 +1527,14 @@ class MenusTab(QWidget):
         self.detail.setItem(ni, 1, _make_total_item(""))
         self.detail.setItem(ni, 2, _make_total_item(""))
         self.detail.setItem(ni, 3, _make_total_item(_fmt(tg)))
-        for c, key in enumerate(NUTRITION_KEYS):
+        for c, key in enumerate(nk):
             self.detail.setItem(ni, 4 + c, _make_total_item(_fmt(tt[key])))
         p = NutritionCalc.per100(tg, tt)
         self.detail.setItem(ni+1, 0, _make_per100_item("per 100 g", True))
         self.detail.setItem(ni+1, 1, _make_per100_item(""))
         self.detail.setItem(ni+1, 2, _make_per100_item(""))
         self.detail.setItem(ni+1, 3, _make_per100_item("100"))
-        for c, key in enumerate(NUTRITION_KEYS):
+        for c, key in enumerate(nk):
             self.detail.setItem(ni+1, 4 + c, _make_per100_item(_fmt(p[key])))
         self.detail.resizeColumnsToContents()
 
@@ -1642,6 +1679,12 @@ class MainWindow(QMainWindow):
             ing_headers = all_headers.get(DatabaseManager.INGREDIENTS_SHEET, [])
             if ing_headers:
                 self.ing_tab.set_headers(ing_headers, self.db._col_map)
+
+            # Pass dynamic nutrition column order to detail tabs
+            nutr_keys = self.db.nutrition_display_order
+            nutr_labels = self.db.nutrition_display_labels
+            self.meals_tab.set_nutrition_order(nutr_keys, nutr_labels)
+            self.menus_tab.set_nutrition_order(nutr_keys, nutr_labels)
 
             self.ing_tab.load(ingredients)
             loaded_meals = self.db.load_meals()
