@@ -1005,6 +1005,13 @@ class IngredientPickerDialog(QDialog):
 
         self._populate_names()
 
+        # Start with empty name field, placeholder, and focus
+        self.name_combo.setCurrentText("")
+        self.name_combo.lineEdit().setPlaceholderText("e.g. Chicken breast")
+        self.brand_combo.clear()
+        self.product_combo.clear()
+        QTimer.singleShot(0, lambda: self.name_combo.setFocus())
+
     @staticmethod
     def _set_completer(combo, items):
         c = QCompleter(items)
@@ -1026,9 +1033,6 @@ class IngredientPickerDialog(QDialog):
         self.name_combo.addItems(display)
         self._set_completer(self.name_combo, display)
         self.name_combo.blockSignals(False)
-        if display:
-            self.name_combo.setCurrentIndex(0)
-            self._on_name_changed(display[0])
 
     def _on_name_changed(self, text):
         """When name changes, auto-fill Brand and Branded Product Name."""
@@ -1059,8 +1063,11 @@ class IngredientPickerDialog(QDialog):
             matching = [i for i in self._all_ings if i.name.lower() == text.lower()]
 
         if matching:
-            brands = list(dict.fromkeys(i.brand or "" for i in matching))
-            products = list(dict.fromkeys(i.product_name or "" for i in matching))
+            brands = list(dict.fromkeys((i.brand or "") for i in matching))
+            products = list(dict.fromkeys((i.product_name or "") for i in matching))
+            # Replace empty strings with clean placeholders
+            brands = [b if b else "No brand" for b in brands]
+            products = [p if p else "Whole food" for p in products]
             self.brand_combo.addItems(brands)
             self._set_completer(self.brand_combo, brands)
             self.product_combo.addItems(products)
