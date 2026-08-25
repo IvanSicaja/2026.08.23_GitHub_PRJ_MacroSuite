@@ -561,7 +561,6 @@ class DatabaseManager:
             # Auto-detect type: check meals first, then ingredients
             if item_name.lower() in meal_names:
                 item_type = "meal"
-                amount = amount / 100.0 if amount > 10 else amount  # servings
             elif item_name.lower() in ing_names:
                 item_type = "ingredient"
             else:
@@ -698,18 +697,17 @@ class DatabaseManager:
                 if entry.item_type == "ingredient":
                     ing = _find_ing(entry.item_name, ingredients)
                     if ing:
-                        ws3.cell(r, 5).value = ing.brand or None     # E: Brand
-                        ws3.cell(r, 6).value = ing.product_name or None  # F: Product
-                        ws3.cell(r, 7).value = f"{entry.amount:.0f} g"   # G: Basis
+                        ws3.cell(r, 5).value = ing.brand or None
+                        ws3.cell(r, 6).value = ing.product_name or None
+                        ws3.cell(r, 7).value = f"{entry.amount:.0f} g"
                         nutr = ing.scaled_nutrition(entry.amount)
-                        weight = entry.amount
                 elif entry.item_type == "meal":
                     meal = meals.get(entry.item_name)
                     if meal:
+                        ws3.cell(r, 7).value = f"{entry.amount:.0f} g"
                         mg, mt = NutritionCalc.meal_totals(meal, ingredients)
-                        ws3.cell(r, 7).value = f"{entry.amount:.1f} x"  # G: servings
-                        nutr = {k: mt[k] * entry.amount for k in NUTRITION_KEYS}
-                        weight = mg * entry.amount
+                        ratio = entry.amount / mg if mg > 0 else 0
+                        nutr = {k: mt[k] * ratio for k in NUTRITION_KEYS}
 
                 # Write nutrition H+ (cols 8-16, 1-based)
                 menu_nutr_cols = [8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -793,9 +791,10 @@ class NutritionCalc:
                 m = meals.get(entry.item_name)
                 if m:
                     mg, mt = NutritionCalc.meal_totals(m, ingredients)
-                    total_g += mg * entry.amount
+                    ratio = entry.amount / mg if mg > 0 else 0
+                    total_g += entry.amount
                     for k in NUTRITION_KEYS:
-                        totals[k] += mt[k] * entry.amount
+                        totals[k] += mt[k] * ratio
         return round(total_g, 1), {k: round(v, 2) for k, v in totals.items()}
 
 
@@ -944,7 +943,8 @@ class IngredientDialog(QDialog):
 class IngredientPickerDialog(QDialog):
     """Unified picker for ingredients (and optionally meals).
     Used by BOTH Meals and Menus tabs — 100% identical appearance.
-    Field order: Name → Brand → Product (auto) → Amount (g)."""
+    Field order: Name → Brand (auto-filled dropdown) → Branded Product Name (auto-filled dropdown) → Amount (g).
+    For meals: Brand empty, Branded Product Name = 'Homemade Food'."""
 
     def __init__(self, parent, ingredients, meals=None):
         super().__init__(parent)
@@ -958,29 +958,24 @@ class IngredientPickerDialog(QDialog):
         lay = QFormLayout(self)
         lay.setSpacing(12); lay.setContentsMargins(24, 24, 24, 24)
 
-        # 1. NAME (includes [Meal] entries when meals are provided)
+        # 1. NAME
         self.name_combo = QComboBox()
         self.name_combo.setEditable(True)
         self.name_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.name_combo.currentIndexChanged.connect(self._on_name)
+        self.name_combo.currentTextChanged.connect(self._on_name_changed)
         lay.addRow("Name", self.name_combo)
 
-        # 2. BRAND (filters ingredient names)
+        # 2. BRAND (dropdown, auto-filled when name is selected)
         self.brand_combo = QComboBox()
         self.brand_combo.setEditable(True)
         self.brand_combo.setInsertPolicy(QComboBox.NoInsert)
-        brands = sorted(set(i.brand for i in self._all_ings if i.brand))
-        self.brand_combo.addItem("— All brands —")
-        self.brand_combo.addItems(brands)
-        self._set_completer(self.brand_combo, ["— All brands —"] + brands)
-        self.brand_combo.currentIndexChanged.connect(self._on_brand)
         lay.addRow("Brand", self.brand_combo)
 
-        # 3. PRODUCT (read-only, auto-filled)
-        self.product_label = QLineEdit("")
-        self.product_label.setReadOnly(True)
-        self.product_label.setStyleSheet(f"background: {C_BG}; color: {C_TEXT2}; border: 1px solid {C_BORDER};")
-        lay.addRow("Product", self.product_label)
+        # 3. BRANDED PRODUCT NAME (dropdown, auto-filled)
+        self.product_combo = QComboBox()
+        self.product_combo.setEditable(True)
+        self.product_combo.setInsertPolicy(QComboBox.NoInsert)
+        lay.addRow("Branded Product Name", self.product_combo)
 
         # 4. AMOUNT (always grams)
         self.amount_spin = QDoubleSpinBox()
@@ -1005,21 +1000,13 @@ class IngredientPickerDialog(QDialog):
             f"selection-background-color: {C_ACCENT}; outline: none; font-size: 13px;")
         combo.setCompleter(c)
 
-    def _filtered_ings(self):
-        bt = self.brand_combo.currentText().strip()
-        if bt == "— All brands —" or not bt:
-            return self._all_ings
-        return [i for i in self._all_ings if i.brand.lower() == bt.lower()]
-
     def _populate_names(self):
         self.name_combo.blockSignals(True)
         self.name_combo.clear()
-        self._name_items = []  # (display_text, type, key_name)
-        # Meals first (if provided)
+        self._name_items = []
         for mn in self._meal_names:
             self._name_items.append((f"[Meal]  {mn}", "meal", mn))
-        # Filtered ingredients
-        for ing in self._filtered_ings():
+        for ing in self._all_ings:
             self._name_items.append((ing.name, "ingredient", ing.name))
         display = [it[0] for it in self._name_items]
         self.name_combo.addItems(display)
@@ -1027,29 +1014,53 @@ class IngredientPickerDialog(QDialog):
         self.name_combo.blockSignals(False)
         if display:
             self.name_combo.setCurrentIndex(0)
-            self._on_name(0)
+            self._on_name_changed(display[0])
 
-    def _on_brand(self, idx):
-        self._populate_names()
+    def _on_name_changed(self, text):
+        """When name changes, auto-fill Brand and Branded Product Name."""
+        text = text.strip()
+        self.brand_combo.blockSignals(True)
+        self.product_combo.blockSignals(True)
+        self.brand_combo.clear()
+        self.product_combo.clear()
 
-    def _on_name(self, idx):
-        if 0 <= idx < len(self._name_items):
-            _, itype, name = self._name_items[idx]
-            if itype == "meal":
-                self.product_label.setText("(Meal)")
-            else:
-                for ing in self._all_ings:
-                    if ing.name == name:
-                        self.product_label.setText(ing.product_name or "—")
-                        return
-                self.product_label.setText("—")
+        # Check if it's a meal
+        for display, itype, name in self._name_items:
+            if (display == text or name == text) and itype == "meal":
+                self.brand_combo.addItem("")
+                self.product_combo.addItem("Homemade Food")
+                self.brand_combo.blockSignals(False)
+                self.product_combo.blockSignals(False)
+                return
+
+        # Find all ingredients matching this name
+        matching = [i for i in self._all_ings if i.name.lower() == text.lower()]
+        if not matching:
+            # Try partial match from display text
+            for display, itype, name in self._name_items:
+                if display == text and itype == "ingredient":
+                    matching = [i for i in self._all_ings if i.name == name]
+                    break
+
+        if matching:
+            # Collect unique brands and products
+            brands = list(dict.fromkeys(i.brand or "" for i in matching))
+            products = list(dict.fromkeys(i.product_name or "" for i in matching))
+
+            self.brand_combo.addItems(brands)
+            self._set_completer(self.brand_combo, brands)
+            self.product_combo.addItems(products)
+            self._set_completer(self.product_combo, products)
         else:
-            self.product_label.setText("—")
+            self.brand_combo.addItem("")
+            self.product_combo.addItem("")
+
+        self.brand_combo.blockSignals(False)
+        self.product_combo.blockSignals(False)
 
     def get_result(self):
         text = self.name_combo.currentText().strip()
         amount = self.amount_spin.value()
-        # Match against name items
         for display, itype, name in self._name_items:
             if display == text or name.lower() == text.lower():
                 if itype == "meal":
@@ -1059,7 +1070,6 @@ class IngredientPickerDialog(QDialog):
                         if ing.name == name:
                             return (ing.id, amount)
                     break
-        # Fallback: direct ingredient name match
         for ing in self._all_ings:
             if ing.name.lower() == text.lower():
                 return (ing.id, amount)
@@ -1464,13 +1474,14 @@ class MenusTab(QWidget):
                     for c, key in enumerate(NUTRITION_KEYS):
                         self.detail.setItem(r, 4 + c, _num_item(sc[key]))
             else:
-                self.detail.setItem(r, 2, _num_item(entry.amount, " ×"))
+                self.detail.setItem(r, 2, _num_item(entry.amount))
                 meal = self.meals.get(entry.item_name)
                 if meal:
                     mg, mt = NutritionCalc.meal_totals(meal, self.ingredients)
-                    self.detail.setItem(r, 3, _num_item(round(mg * entry.amount, 1)))
+                    self.detail.setItem(r, 3, _num_item(entry.amount))
+                    ratio = entry.amount / mg if mg > 0 else 0
                     for c, key in enumerate(NUTRITION_KEYS):
-                        self.detail.setItem(r, 4 + c, _num_item(round(mt[key] * entry.amount, 2)))
+                        self.detail.setItem(r, 4 + c, _num_item(round(mt[key] * ratio, 2)))
                     p100 = NutritionCalc.per100(mg, mt)
                     kcal_for_color = p100.get("energy_kcal", 0)
             _color_row_text(self.detail, r, _calorie_text_color(kcal_for_color))
@@ -1527,15 +1538,10 @@ class MenusTab(QWidget):
             if result is None:
                 return
             if isinstance(result, MenuEntry):
-                # Meal selected — amount in grams, convert to servings
-                meal = self.meals.get(result.item_name)
-                if meal:
-                    mg, _ = NutritionCalc.meal_totals(meal, self.ingredients)
-                    servings = result.amount / mg if mg > 0 else 1.0
-                    result = MenuEntry("meal", result.item_name, round(servings, 2))
+                # Meal — amount is already in grams
                 m.items.append(result)
             else:
-                # Ingredient: result = (ing_id, amount)
+                # Ingredient: result = (ing_id, amount_grams)
                 ing_id, amount = result
                 ing = self.ingredients.get(ing_id)
                 if ing:
