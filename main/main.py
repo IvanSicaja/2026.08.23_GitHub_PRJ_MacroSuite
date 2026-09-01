@@ -1135,6 +1135,168 @@ class IngredientPickerDialog(QDialog):
 
 
 
+# ━━━━━━━━━━━━━━━━ PROFILE & DAILY TARGETS ━━━━━━━━━━━━━━━━
+
+PROFILE_KEYS = ["gender", "weight_kg", "height_cm", "age", "training"]
+
+def calc_daily_targets(gender="male", weight_kg=80, height_cm=180, age=30, training=True):
+    """Mifflin-St Jeor BMR + activity → daily macro targets."""
+    if gender == "male":
+        bmr = 10 * weight_kg + 6.25 * height_cm - 5 * age + 5
+    else:
+        bmr = 10 * weight_kg + 6.25 * height_cm - 5 * age - 161
+    mult = 1.725 if training else 1.375
+    kcal = round(bmr * mult)
+    kj = round(kcal * 4.184)
+    protein = round(weight_kg * (1.8 if training else 1.0), 1)
+    fat = round(kcal * 0.28 / 9, 1)
+    sat_fat = round(fat * 0.33, 1)
+    carbs = round((kcal - protein * 4 - fat * 9) / 4, 1)
+    sugars = round(carbs * 0.2, 1)
+    fibre = 30.0 if gender == "male" else 25.0
+    salt = 5.0
+    return {
+        "energy_kcal": kcal, "energy_kj": kj, "fat": fat,
+        "saturated_fat": sat_fat, "carbohydrate": carbs, "sugars": sugars,
+        "fibre": fibre, "protein": protein, "salt": salt,
+    }
+
+
+class ProfileDialog(QDialog):
+    """Configure personal profile for daily targets."""
+    def __init__(self, parent, settings: QSettings):
+        super().__init__(parent)
+        self.setWindowTitle("Daily Target Profile")
+        self.setMinimumWidth(400)
+        self.settings = settings
+        lay = QFormLayout(self)
+        lay.setSpacing(12); lay.setContentsMargins(24, 24, 24, 24)
+
+        lbl = QLabel("Personal Profile")
+        lbl.setStyleSheet(f"font-weight: 700; font-size: 14px; color: {C_ACCENT};")
+        lay.addRow(lbl)
+
+        self.gender_combo = QComboBox()
+        self.gender_combo.addItems(["Male", "Female"])
+        self.gender_combo.setCurrentText(settings.value("profile/gender", "Male"))
+        lay.addRow("Gender", self.gender_combo)
+
+        self.age_spin = QDoubleSpinBox()
+        self.age_spin.setRange(10, 100); self.age_spin.setDecimals(0)
+        self.age_spin.setValue(int(settings.value("profile/age", 30)))
+        lay.addRow("Age", self.age_spin)
+
+        self.weight_spin = QDoubleSpinBox()
+        self.weight_spin.setRange(30, 250); self.weight_spin.setDecimals(1)
+        self.weight_spin.setValue(float(settings.value("profile/weight_kg", 80)))
+        self.weight_spin.setSuffix(" kg")
+        lay.addRow("Weight", self.weight_spin)
+
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setRange(100, 250); self.height_spin.setDecimals(0)
+        self.height_spin.setValue(int(settings.value("profile/height_cm", 180)))
+        self.height_spin.setSuffix(" cm")
+        lay.addRow("Height", self.height_spin)
+
+        self.training_combo = QComboBox()
+        self.training_combo.addItems(["Training", "Not Training"])
+        self.training_combo.setCurrentIndex(0 if settings.value("profile/training", "true") == "true" else 1)
+        lay.addRow("Activity", self.training_combo)
+
+        btns = QHBoxLayout(); btns.addStretch()
+        cancel = QPushButton("Cancel"); cancel.setProperty("class", "secondary"); cancel.clicked.connect(self.reject)
+        save = QPushButton("Save"); save.clicked.connect(self.accept); save.setDefault(True)
+        btns.addWidget(cancel); btns.addWidget(save)
+        lay.addRow(btns)
+
+    def save_profile(self):
+        self.settings.setValue("profile/gender", self.gender_combo.currentText())
+        self.settings.setValue("profile/age", int(self.age_spin.value()))
+        self.settings.setValue("profile/weight_kg", self.weight_spin.value())
+        self.settings.setValue("profile/height_cm", int(self.height_spin.value()))
+        self.settings.setValue("profile/training", "true" if self.training_combo.currentIndex() == 0 else "false")
+
+    def get_targets(self):
+        return calc_daily_targets(
+            gender=self.gender_combo.currentText().lower(),
+            weight_kg=self.weight_spin.value(),
+            height_cm=int(self.height_spin.value()),
+            age=int(self.age_spin.value()),
+            training=self.training_combo.currentIndex() == 0,
+        )
+
+
+class DailyTargetBar(QFrame):
+    """Compact bar showing daily optimal targets, aligned with table nutrition columns."""
+    profile_clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 8px; padding: 6px;")
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(12, 6, 12, 6); self._lay.setSpacing(8)
+
+        icon = QLabel("🎯")
+        icon.setStyleSheet("font-size: 14px; background: transparent;")
+        self._lay.addWidget(icon)
+
+        title = QLabel("Daily Target")
+        title.setStyleSheet(f"font-weight: 700; font-size: 12px; color: {C_ACCENT}; background: transparent;")
+        self._lay.addWidget(title)
+
+        self._labels: Dict[str, QLabel] = {}
+        for key, name in NUTRITION_FIELDS:
+            short = name.replace("Energy ", "").replace("Sat. ", "S.").replace(" (g)", "").replace("(", "").replace(")", "")
+            container = QVBoxLayout()
+            container.setSpacing(1)
+            val_lbl = QLabel("—")
+            val_lbl.setAlignment(Qt.AlignCenter)
+            val_lbl.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {C_TEXT}; background: transparent;")
+            name_lbl = QLabel(short)
+            name_lbl.setAlignment(Qt.AlignCenter)
+            name_lbl.setStyleSheet(f"font-size: 9px; color: {C_TEXT3}; background: transparent;")
+            container.addWidget(val_lbl)
+            container.addWidget(name_lbl)
+            self._lay.addLayout(container)
+            self._labels[key] = val_lbl
+
+        self._lay.addStretch()
+
+        self._profile_lbl = QLabel("")
+        self._profile_lbl.setStyleSheet(f"font-size: 10px; color: {C_TEXT3}; background: transparent;")
+        self._lay.addWidget(self._profile_lbl)
+
+        edit_btn = QPushButton("⚙")
+        edit_btn.setFixedSize(28, 28)
+        edit_btn.setStyleSheet(f"background: {C_BORDER2}; border-radius: 14px; font-size: 14px; padding: 0; min-height: 0;")
+        edit_btn.clicked.connect(self.profile_clicked.emit)
+        self._lay.addWidget(edit_btn)
+
+    def update_targets(self, targets: Dict[str, float], profile_text: str = ""):
+        for key, lbl in self._labels.items():
+            v = targets.get(key, 0)
+            lbl.setText(f"{v:.0f}" if v == int(v) else f"{v:.1f}")
+        self._profile_lbl.setText(profile_text)
+
+
+def _make_legend_layout():
+    """Create the calorie color legend (reusable for all tabs)."""
+    legend = QHBoxLayout()
+    legend.addStretch()
+    for color, label in [
+        (CAL_TEXT_GREEN,  "● 0–149 kcal (Low)"),
+        (CAL_TEXT_YELLOW, "● 150–399 kcal (Medium)"),
+        (CAL_TEXT_ORANGE, "● ≥ 400 kcal (High)"),
+    ]:
+        lbl = QLabel(label)
+        lbl.setStyleSheet(
+            f"color: rgb({color.red()},{color.green()},{color.blue()});"
+            f"font-size: 11px; font-weight: 600; padding: 2px 12px; background: transparent;")
+        legend.addWidget(lbl)
+    legend.addStretch()
+    return legend
+
+
 # ━━━━━━━━━━━━━━━━━ INGREDIENTS TAB ━━━━━━━━━━━━━━━━━━━
 
 class IngredientsTab(QWidget):
@@ -1171,22 +1333,10 @@ class IngredientsTab(QWidget):
         self.table.doubleClicked.connect(self._edit)
         lay.addWidget(self.table)
 
-        # ── Calorie color legend ──
-        legend = QHBoxLayout()
-        legend.addStretch()
-        for color, label in [
-            (CAL_TEXT_GREEN,  "● 0–149 kcal (Low)"),
-            (CAL_TEXT_YELLOW, "● 150–399 kcal (Medium)"),
-            (CAL_TEXT_ORANGE, "● ≥ 400 kcal (High)"),
-        ]:
-            lbl = QLabel(label)
-            lbl.setStyleSheet(
-                f"color: rgb({color.red()},{color.green()},{color.blue()});"
-                f"font-size: 11px; font-weight: 600; padding: 2px 12px; background: transparent;"
-            )
-            legend.addWidget(lbl)
-        legend.addStretch()
-        lay.addLayout(legend)
+        lay.addLayout(_make_legend_layout())
+
+        self.daily_bar = DailyTargetBar()
+        lay.addWidget(self.daily_bar)
 
         btns = QHBoxLayout(); btns.addStretch()
         eb = QPushButton("Edit"); eb.setProperty("class", "secondary"); eb.clicked.connect(self._edit)
@@ -1338,6 +1488,9 @@ class MealsTab(QWidget):
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_ing)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
+        right.addLayout(_make_legend_layout())
+        self.daily_bar = DailyTargetBar()
+        right.addWidget(self.daily_bar)
         lay.addLayout(right, 1)
 
     def load(self, meals): self.meals = meals; self._populate_list()
@@ -1506,6 +1659,9 @@ class MenusTab(QWidget):
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_item)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
+        right.addLayout(_make_legend_layout())
+        self.daily_bar = DailyTargetBar()
+        right.addWidget(self.daily_bar)
         lay.addLayout(right, 1)
 
     def load(self, menus): self.menus = menus; self._populate_list()
@@ -1697,6 +1853,11 @@ class MainWindow(QMainWindow):
         if last and Path(last).is_file(): self._open_db(last)
         else: self.status.showMessage("Select a database to get started")
 
+        # Connect all daily target bars to profile editor
+        for bar in [self.ing_tab.daily_bar, self.meals_tab.daily_bar, self.menus_tab.daily_bar]:
+            bar.profile_clicked.connect(self._edit_profile)
+        self._update_daily_targets()
+
     def _browse_db(self):
         start = str(Path(self.db.path).parent) if self.db else str(Path.home())
         path, _ = QFileDialog.getOpenFileName(self, "Select Nutrition Database", start, "Excel Files (*.xlsx);;All Files (*)")
@@ -1756,6 +1917,28 @@ class MainWindow(QMainWindow):
         if idx == 0: self.ing_tab._add()
         elif idx == 1: self.meals_tab._add_ing()
         elif idx == 2: self.menus_tab._add_item()
+
+    def _edit_profile(self):
+        d = ProfileDialog(self, self.settings)
+        if d.exec() == QDialog.Accepted:
+            d.save_profile()
+            self._update_daily_targets()
+
+    def _update_daily_targets(self):
+        s = self.settings
+        targets = calc_daily_targets(
+            gender=s.value("profile/gender", "Male").lower(),
+            weight_kg=float(s.value("profile/weight_kg", 80)),
+            height_cm=int(s.value("profile/height_cm", 180)),
+            age=int(s.value("profile/age", 30)),
+            training=s.value("profile/training", "true") == "true",
+        )
+        g = s.value("profile/gender", "Male")
+        w = s.value("profile/weight_kg", "80")
+        t = "Training" if s.value("profile/training", "true") == "true" else "Rest"
+        profile_text = f"{g} · {w} kg · {t}"
+        for bar in [self.ing_tab.daily_bar, self.meals_tab.daily_bar, self.menus_tab.daily_bar]:
+            bar.update_targets(targets, profile_text)
 
     def closeEvent(self, event):
         if self.db:
