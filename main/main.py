@@ -1226,75 +1226,35 @@ class ProfileDialog(QDialog):
         )
 
 
-class DailyTargetBar(QFrame):
-    """Compact bar showing daily optimal targets, aligned with table nutrition columns."""
-    profile_clicked = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet(f"background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 8px; padding: 6px;")
-        self._lay = QHBoxLayout(self)
-        self._lay.setContentsMargins(12, 6, 12, 6); self._lay.setSpacing(8)
-
-        icon = QLabel("🎯")
-        icon.setStyleSheet("font-size: 14px; background: transparent;")
-        self._lay.addWidget(icon)
-
-        title = QLabel("Daily Target")
-        title.setStyleSheet(f"font-weight: 700; font-size: 12px; color: {C_ACCENT}; background: transparent;")
-        self._lay.addWidget(title)
-
-        self._labels: Dict[str, QLabel] = {}
-        for key, name in NUTRITION_FIELDS:
-            short = name.replace("Energy ", "").replace("Sat. ", "S.").replace(" (g)", "").replace("(", "").replace(")", "")
-            container = QVBoxLayout()
-            container.setSpacing(1)
-            val_lbl = QLabel("—")
-            val_lbl.setAlignment(Qt.AlignCenter)
-            val_lbl.setStyleSheet(f"font-weight: 600; font-size: 12px; color: {C_TEXT}; background: transparent;")
-            name_lbl = QLabel(short)
-            name_lbl.setAlignment(Qt.AlignCenter)
-            name_lbl.setStyleSheet(f"font-size: 9px; color: {C_TEXT3}; background: transparent;")
-            container.addWidget(val_lbl)
-            container.addWidget(name_lbl)
-            self._lay.addLayout(container)
-            self._labels[key] = val_lbl
-
-        self._lay.addStretch()
-
-        self._profile_lbl = QLabel("")
-        self._profile_lbl.setStyleSheet(f"font-size: 10px; color: {C_TEXT3}; background: transparent;")
-        self._lay.addWidget(self._profile_lbl)
-
-        edit_btn = QPushButton("⚙")
-        edit_btn.setFixedSize(28, 28)
-        edit_btn.setStyleSheet(f"background: {C_BORDER2}; border-radius: 14px; font-size: 14px; padding: 0; min-height: 0;")
-        edit_btn.clicked.connect(self.profile_clicked.emit)
-        self._lay.addWidget(edit_btn)
-
-    def update_targets(self, targets: Dict[str, float], profile_text: str = ""):
-        for key, lbl in self._labels.items():
-            v = targets.get(key, 0)
-            lbl.setText(f"{v:.0f}" if v == int(v) else f"{v:.1f}")
-        self._profile_lbl.setText(profile_text)
+C_DAILY_BG = "#1a2e3a"
 
 
-def _make_legend_layout():
-    """Create the calorie color legend (reusable for all tabs)."""
-    legend = QHBoxLayout()
-    legend.addStretch()
-    for color, label in [
-        (CAL_TEXT_GREEN,  "● 0–149 kcal (Low)"),
-        (CAL_TEXT_YELLOW, "● 150–399 kcal (Medium)"),
-        (CAL_TEXT_ORANGE, "● ≥ 400 kcal (High)"),
+def _make_daily_item(text, is_label=False):
+    item = QTableWidgetItem(str(text))
+    item.setFlags(Qt.ItemIsEnabled)
+    item.setBackground(QColor(C_DAILY_BG))
+    item.setForeground(QColor("#5ac8c8"))
+    f = item.font(); f.setBold(True); item.setFont(f)
+    item.setTextAlignment((Qt.AlignLeft if is_label else Qt.AlignRight) | Qt.AlignVCenter)
+    return item
+
+
+def _make_legend_with_profile():
+    frame = QHBoxLayout()
+    frame.addStretch()
+    for color, emoji, label in [
+        (CAL_TEXT_GREEN,  "🟢", "0 – 149 kcal  Low"),
+        (CAL_TEXT_YELLOW, "🟡", "150 – 399 kcal  Medium"),
+        (CAL_TEXT_ORANGE, "🔴", "≥ 400 kcal  High"),
     ]:
-        lbl = QLabel(label)
+        lbl = QLabel(f"  {emoji}  {label}  ")
         lbl.setStyleSheet(
             f"color: rgb({color.red()},{color.green()},{color.blue()});"
-            f"font-size: 11px; font-weight: 600; padding: 2px 12px; background: transparent;")
-        legend.addWidget(lbl)
-    legend.addStretch()
-    return legend
+            f"font-size: 13px; font-weight: 600; padding: 4px 16px;"
+            f"background: {C_CARD}; border: 1px solid {C_BORDER}; border-radius: 6px;")
+        frame.addWidget(lbl)
+    frame.addStretch()
+    return frame
 
 
 # ━━━━━━━━━━━━━━━━━ INGREDIENTS TAB ━━━━━━━━━━━━━━━━━━━
@@ -1307,6 +1267,8 @@ class IngredientsTab(QWidget):
         self.ingredients: Dict[int, Ingredient] = {}
         self.db_headers: List[str] = []
         self._col_map: Dict[str, int] = {}  # field → 0-based column index
+        self.daily_targets: Dict[str, float] = {}
+        self.daily_profile: str = ""
         self._build()
 
     def _build(self):
@@ -1333,10 +1295,12 @@ class IngredientsTab(QWidget):
         self.table.doubleClicked.connect(self._edit)
         lay.addWidget(self.table)
 
-        lay.addLayout(_make_legend_layout())
-
-        self.daily_bar = DailyTargetBar()
-        lay.addWidget(self.daily_bar)
+        legend_lay = _make_legend_with_profile()
+        self.profile_btn = QPushButton("⚙ Profile")
+        self.profile_btn.setFixedHeight(30)
+        self.profile_btn.setStyleSheet(f"background: {C_BORDER2}; border-radius: 6px; font-size: 12px; padding: 2px 14px; min-height: 0;")
+        legend_lay.addWidget(self.profile_btn)
+        lay.addLayout(legend_lay)
 
         btns = QHBoxLayout(); btns.addStretch()
         eb = QPushButton("Edit"); eb.setProperty("class", "secondary"); eb.clicked.connect(self._edit)
@@ -1389,7 +1353,22 @@ class IngredientsTab(QWidget):
                     self.table.setItem(r, col, _num_item(getattr(ing, field)))
             # Calorie color
             _color_row_text(self.table, r, _calorie_text_color(ing.energy_kcal))
+
+        # ── DAILY TARGET (last row, always visible) ──
+        if self.daily_targets:
+            dr = len(items)
+            self.table.setRowCount(dr + 1)
+            for c in range(n_cols):
+                self.table.setItem(dr, c, _make_daily_item(""))
+            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
+            self.table.setItem(dr, 2, _make_daily_item(desc, True))
+            for field in NUTRITION_KEYS:
+                col = cm.get(field, -1)
+                if 0 <= col < n_cols:
+                    self.table.setItem(dr, col, _make_daily_item(_fmt(self.daily_targets.get(field, 0))))
+
         self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(True)
         self.table.setSortingEnabled(True)
 
     def _filter(self, text): self._populate(text)
@@ -1439,6 +1418,8 @@ class MealsTab(QWidget):
         self.ing_tab = ing_tab; self.meals: Dict[str, Meal] = {}
         self._nutr_keys = NUTRITION_KEYS      # updated from DB
         self._nutr_labels = NUTRITION_LABELS
+        self.daily_targets: Dict[str, float] = {}
+        self.daily_profile: str = ""
         self._build()
 
     @property
@@ -1488,9 +1469,15 @@ class MealsTab(QWidget):
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_ing)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
-        right.addLayout(_make_legend_layout())
-        self.daily_bar = DailyTargetBar()
-        right.addWidget(self.daily_bar)
+
+
+        legend_lay = _make_legend_with_profile()
+        self.profile_btn = QPushButton("⚙ Profile")
+        self.profile_btn.setFixedHeight(30)
+        self.profile_btn.setStyleSheet(f"background: {C_BORDER2}; border-radius: 6px; font-size: 12px; padding: 2px 14px; min-height: 0;")
+        legend_lay.addWidget(self.profile_btn)
+        right.addLayout(legend_lay)
+
         lay.addLayout(right, 1)
 
     def load(self, meals): self.meals = meals; self._populate_list()
@@ -1516,7 +1503,20 @@ class MealsTab(QWidget):
 
     def _on_select(self, cur, prev=None):
         meal = self._cur()
-        if not meal: self.title_lbl.setText("Select a meal"); self.detail.setRowCount(0); return
+        if not meal:
+            self.title_lbl.setText("Select a meal")
+            # Show only daily target row when nothing selected
+            nk = self._nutr_keys
+            if self.daily_targets:
+                self.detail.setRowCount(1)
+                desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
+                self.detail.setItem(0, 0, _make_daily_item(desc, True))
+                self.detail.setItem(0, 1, _make_daily_item(""))
+                for c, key in enumerate(nk):
+                    self.detail.setItem(0, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+            else:
+                self.detail.setRowCount(0)
+            return
         self.title_lbl.setText(meal.name); self._refresh()
 
     def _refresh(self):
@@ -1545,6 +1545,17 @@ class MealsTab(QWidget):
         self.detail.setItem(n+1, 1, _make_per100_item("100"))
         for c, key in enumerate(nk):
             self.detail.setItem(n+1, 2 + c, _make_per100_item(_fmt(p[key])))
+
+        # ── DAILY TARGET (last row) ──
+        if self.daily_targets:
+            dr = n + 2
+            self.detail.setRowCount(dr + 1)
+            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
+            self.detail.setItem(dr, 0, _make_daily_item(desc, True))
+            self.detail.setItem(dr, 1, _make_daily_item(""))
+            for c, key in enumerate(nk):
+                self.detail.setItem(dr, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+
         self.detail.resizeColumnsToContents()
 
     def _add_meal(self):
@@ -1609,6 +1620,8 @@ class MenusTab(QWidget):
         self.menus: Dict[str, Menu] = {}
         self._nutr_keys = NUTRITION_KEYS
         self._nutr_labels = NUTRITION_LABELS
+        self.daily_targets: Dict[str, float] = {}
+        self.daily_profile: str = ""
         self._build()
 
     @property
@@ -1659,9 +1672,15 @@ class MenusTab(QWidget):
         ri = QPushButton("Remove"); ri.setProperty("class", "danger"); ri.clicked.connect(self._remove_item)
         rb.addWidget(ai); rb.addWidget(ea); rb.addStretch(); rb.addWidget(ri)
         right.addLayout(rb)
-        right.addLayout(_make_legend_layout())
-        self.daily_bar = DailyTargetBar()
-        right.addWidget(self.daily_bar)
+
+
+        legend_lay = _make_legend_with_profile()
+        self.profile_btn = QPushButton("⚙ Profile")
+        self.profile_btn.setFixedHeight(30)
+        self.profile_btn.setStyleSheet(f"background: {C_BORDER2}; border-radius: 6px; font-size: 12px; padding: 2px 14px; min-height: 0;")
+        legend_lay.addWidget(self.profile_btn)
+        right.addLayout(legend_lay)
+
         lay.addLayout(right, 1)
 
     def load(self, menus): self.menus = menus; self._populate_list()
@@ -1685,7 +1704,20 @@ class MenusTab(QWidget):
 
     def _on_select(self, cur, prev=None):
         menu = self._cur()
-        if not menu: self.title_lbl.setText("Select a menu"); self.detail.setRowCount(0); return
+        if not menu:
+            self.title_lbl.setText("Select a menu")
+            nk = self._nutr_keys
+            if self.daily_targets:
+                self.detail.setRowCount(1)
+                desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
+                self.detail.setItem(0, 0, _make_daily_item(desc, True))
+                self.detail.setItem(0, 1, _make_daily_item(""))
+                self.detail.setItem(0, 2, _make_daily_item(""))
+                for c, key in enumerate(nk):
+                    self.detail.setItem(0, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+            else:
+                self.detail.setRowCount(0)
+            return
         self.title_lbl.setText(menu.name); self._refresh()
 
     def _refresh(self):
@@ -1728,6 +1760,18 @@ class MenusTab(QWidget):
         self.detail.setItem(ni+1, 2, _make_per100_item("100"))
         for c, key in enumerate(nk):
             self.detail.setItem(ni+1, 3 + c, _make_per100_item(_fmt(p[key])))
+
+        # ── DAILY TARGET (last row) ──
+        if self.daily_targets:
+            dr = ni + 2
+            self.detail.setRowCount(dr + 1)
+            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
+            self.detail.setItem(dr, 0, _make_daily_item(desc, True))
+            self.detail.setItem(dr, 1, _make_daily_item(""))
+            self.detail.setItem(dr, 2, _make_daily_item(""))
+            for c, key in enumerate(nk):
+                self.detail.setItem(dr, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+
         self.detail.resizeColumnsToContents()
 
     def _add_menu(self):
@@ -1853,9 +1897,9 @@ class MainWindow(QMainWindow):
         if last and Path(last).is_file(): self._open_db(last)
         else: self.status.showMessage("Select a database to get started")
 
-        # Connect all daily target bars to profile editor
-        for bar in [self.ing_tab.daily_bar, self.meals_tab.daily_bar, self.menus_tab.daily_bar]:
-            bar.profile_clicked.connect(self._edit_profile)
+        # Connect profile buttons
+        for tab in [self.ing_tab, self.meals_tab, self.menus_tab]:
+            tab.profile_btn.clicked.connect(self._edit_profile)
         self._update_daily_targets()
 
     def _browse_db(self):
@@ -1937,8 +1981,8 @@ class MainWindow(QMainWindow):
         w = s.value("profile/weight_kg", "80")
         t = "Training" if s.value("profile/training", "true") == "true" else "Rest"
         profile_text = f"{g} · {w} kg · {t}"
-        for bar in [self.ing_tab.daily_bar, self.meals_tab.daily_bar, self.menus_tab.daily_bar]:
-            bar.update_targets(targets, profile_text)
+        for tab in [self.ing_tab, self.meals_tab, self.menus_tab]:
+            tab.daily_targets = targets; tab.daily_profile = profile_text
 
     def closeEvent(self, event):
         if self.db:
