@@ -1233,10 +1233,28 @@ def _make_daily_item(text, is_label=False):
     item = QTableWidgetItem(str(text))
     item.setFlags(Qt.ItemIsEnabled)
     item.setBackground(QColor(C_DAILY_BG))
-    item.setForeground(QColor("#5ac8c8"))
-    f = item.font(); f.setBold(True); item.setFont(f)
-    item.setTextAlignment((Qt.AlignLeft if is_label else Qt.AlignRight) | Qt.AlignVCenter)
+    if is_label:
+        item.setForeground(QColor("#c8c8cc"))
+        f = item.font(); f.setBold(True); item.setFont(f)
+        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    else:
+        item.setForeground(QColor("#e0e0e4"))
+        f = item.font(); f.setBold(True); item.setFont(f)
+        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
     return item
+
+
+def _daily_desc(profile: str) -> str:
+    return f"Daily Target  ·  {profile}" if profile else "Daily Target"
+
+
+def _ensure_col_width_for_text(table: QTableWidget, col: int, text: str, padding: int = 40):
+    """Expand column width if needed to fit the daily target text."""
+    from PySide6.QtGui import QFontMetrics
+    fm = QFontMetrics(table.font())
+    needed = fm.horizontalAdvance(text) + padding
+    if table.columnWidth(col) < needed:
+        table.setColumnWidth(col, needed)
 
 
 def _make_legend_with_profile():
@@ -1360,8 +1378,7 @@ class IngredientsTab(QWidget):
             self.table.setRowCount(dr + 1)
             for c in range(n_cols):
                 self.table.setItem(dr, c, _make_daily_item(""))
-            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
-            self.table.setItem(dr, 2, _make_daily_item(desc, True))
+            self.table.setItem(dr, 2, _make_daily_item(_daily_desc(self.daily_profile), True))
             for field in NUTRITION_KEYS:
                 col = cm.get(field, -1)
                 if 0 <= col < n_cols:
@@ -1509,9 +1526,9 @@ class MealsTab(QWidget):
             nk = self._nutr_keys
             if self.daily_targets:
                 self.detail.setRowCount(1)
-                desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
-                self.detail.setItem(0, 0, _make_daily_item(desc, True))
-                self.detail.setItem(0, 1, _make_daily_item(""))
+                self.detail.setSpan(0, 0, 1, 2)
+                self.detail.setItem(0, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
+                _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
                 for c, key in enumerate(nk):
                     self.detail.setItem(0, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
             else:
@@ -1550,9 +1567,9 @@ class MealsTab(QWidget):
         if self.daily_targets:
             dr = n + 2
             self.detail.setRowCount(dr + 1)
-            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
-            self.detail.setItem(dr, 0, _make_daily_item(desc, True))
-            self.detail.setItem(dr, 1, _make_daily_item(""))
+            self.detail.setSpan(dr, 0, 1, 2)
+            self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
+            _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
 
@@ -1709,10 +1726,9 @@ class MenusTab(QWidget):
             nk = self._nutr_keys
             if self.daily_targets:
                 self.detail.setRowCount(1)
-                desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
-                self.detail.setItem(0, 0, _make_daily_item(desc, True))
-                self.detail.setItem(0, 1, _make_daily_item(""))
-                self.detail.setItem(0, 2, _make_daily_item(""))
+                self.detail.setSpan(0, 0, 1, 3)
+                self.detail.setItem(0, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
+                _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
                 for c, key in enumerate(nk):
                     self.detail.setItem(0, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
             else:
@@ -1765,10 +1781,9 @@ class MenusTab(QWidget):
         if self.daily_targets:
             dr = ni + 2
             self.detail.setRowCount(dr + 1)
-            desc = f"🎯 Daily Target — {self.daily_profile}" if self.daily_profile else "🎯 Daily Target"
-            self.detail.setItem(dr, 0, _make_daily_item(desc, True))
-            self.detail.setItem(dr, 1, _make_daily_item(""))
-            self.detail.setItem(dr, 2, _make_daily_item(""))
+            self.detail.setSpan(dr, 0, 1, 3)
+            self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
+            _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
 
@@ -1979,8 +1994,11 @@ class MainWindow(QMainWindow):
         )
         g = s.value("profile/gender", "Male")
         w = s.value("profile/weight_kg", "80")
+        h = s.value("profile/height_cm", "180")
+        a = s.value("profile/age", "30")
         t = "Training" if s.value("profile/training", "true") == "true" else "Rest"
-        profile_text = f"{g} · {w} kg · {t}"
+        symbol = "♂" if g == "Male" else "♀"
+        profile_text = f"{symbol} {w} kg · {h} cm · {a}y · {t}"
         for tab in [self.ing_tab, self.meals_tab, self.menus_tab]:
             tab.daily_targets = targets; tab.daily_profile = profile_text
 
