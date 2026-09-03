@@ -1248,13 +1248,16 @@ def _daily_desc(profile: str) -> str:
     return f"Daily Target  ·  {profile}" if profile else "Daily Target"
 
 
-def _ensure_col_width_for_text(table: QTableWidget, col: int, text: str, padding: int = 40):
-    """Expand column width if needed to fit the daily target text."""
+def _ensure_col_width_for_text(table: QTableWidget, text: str, span_cols: list, padding: int = 50):
+    """Expand the last spanned column so the combined width fits the text."""
     from PySide6.QtGui import QFontMetrics
     fm = QFontMetrics(table.font())
     needed = fm.horizontalAdvance(text) + padding
-    if table.columnWidth(col) < needed:
-        table.setColumnWidth(col, needed)
+    current = sum(table.columnWidth(c) for c in span_cols)
+    if current < needed:
+        deficit = needed - current
+        last = span_cols[-1]
+        table.setColumnWidth(last, table.columnWidth(last) + deficit)
 
 
 def _make_legend_with_profile():
@@ -1385,7 +1388,8 @@ class IngredientsTab(QWidget):
                     self.table.setItem(dr, col, _make_daily_item(_fmt(self.daily_targets.get(field, 0))))
 
         self.table.resizeColumnsToContents()
-        self.table.setSortingEnabled(True)
+        if self.daily_targets:
+            _ensure_col_width_for_text(self.table, _daily_desc(self.daily_profile), [2])
         self.table.setSortingEnabled(True)
 
     def _filter(self, text): self._populate(text)
@@ -1528,7 +1532,7 @@ class MealsTab(QWidget):
                 self.detail.setRowCount(1)
                 self.detail.setSpan(0, 0, 1, 2)
                 self.detail.setItem(0, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-                _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
+                _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1])
                 for c, key in enumerate(nk):
                     self.detail.setItem(0, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
             else:
@@ -1569,11 +1573,13 @@ class MealsTab(QWidget):
             self.detail.setRowCount(dr + 1)
             self.detail.setSpan(dr, 0, 1, 2)
             self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-            _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
+            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1])
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
 
         self.detail.resizeColumnsToContents()
+        if self.daily_targets:
+            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1])
 
     def _add_meal(self):
         n, ok = QInputDialog.getText(self, "New Meal", "Meal name:")
@@ -1728,7 +1734,7 @@ class MenusTab(QWidget):
                 self.detail.setRowCount(1)
                 self.detail.setSpan(0, 0, 1, 3)
                 self.detail.setItem(0, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-                _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
+                _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1, 2])
                 for c, key in enumerate(nk):
                     self.detail.setItem(0, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
             else:
@@ -1783,11 +1789,13 @@ class MenusTab(QWidget):
             self.detail.setRowCount(dr + 1)
             self.detail.setSpan(dr, 0, 1, 3)
             self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-            _ensure_col_width_for_text(self.detail, 1, _daily_desc(self.daily_profile))
+            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1, 2])
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
 
         self.detail.resizeColumnsToContents()
+        if self.daily_targets:
+            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1, 2])
 
     def _add_menu(self):
         n, ok = QInputDialog.getText(self, "New Menu", "Menu name:")
