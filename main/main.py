@@ -1228,9 +1228,8 @@ class ProfileDialog(QDialog):
 
 C_DAILY_BG = "#1a2e3a"
 C_DIFF_BG  = "#1e1e22"
-C_DIFF_OVER  = QColor("#ff5555")   # ▲ red — over target
-C_DIFF_UNDER = QColor("#ffbb33")   # ▼ amber — under target
-C_DIFF_OK    = QColor("#5599ff")   # ● blue — on target (±5%)
+C_DIFF_OVER  = QColor("#ff5555")   # red — outside ±5%
+C_DIFF_OK    = QColor("#5599ff")   # blue — within ±5%
 
 
 def _make_daily_item(text, is_label=False):
@@ -1254,9 +1253,10 @@ def _daily_desc(profile: str) -> str:
 
 def _calc_balance(totals: Dict[str, float], targets: Dict[str, float],
                   nutr_keys: List[str]) -> Tuple[Dict[str, Tuple[str, QColor]], str]:
-    """Compare totals vs daily targets. Returns {key: (display_text, color)} and summary."""
+    """Compare totals vs daily targets. Returns {key: (display_text, color)} and summary.
+    Blue = within ±5%, Red = outside ±5%. Always arrows ▲/▼."""
     items = {}
-    deviations = []  # (abs_pct, key, direction)
+    deviations = []
 
     for key in nutr_keys:
         total = totals.get(key, 0)
@@ -1266,16 +1266,15 @@ def _calc_balance(totals: Dict[str, float], targets: Dict[str, float],
             continue
         diff = total - target
         pct = (diff / target) * 100
-        if pct > 5:
-            items[key] = (f"▲ +{abs(diff):.0f}", C_DIFF_OVER)
-            deviations.append((abs(pct), key, "over"))
-        elif pct < -5:
-            items[key] = (f"▼ −{abs(diff):.0f}", C_DIFF_UNDER)
-            deviations.append((abs(pct), key, "under"))
-        else:
-            items[key] = (f"● {diff:+.0f}", C_DIFF_OK)
+        is_over = diff >= 0
+        arrow = "▲" if is_over else "▼"
+        sign = "+" if is_over else "−"
+        color = C_DIFF_OK if abs(pct) <= 5 else C_DIFF_OVER
+        items[key] = (f"{arrow} {sign}{abs(diff):.0f}", color)
+        if abs(pct) > 5:
+            deviations.append((abs(pct), key, "over" if is_over else "under"))
 
-    # Build summary from top 3 deviations (skip duplicate energy)
+    # Build summary from top 3 deviations by percentage
     if not deviations:
         summary = "✓ Perfectly balanced meal"
     else:
@@ -1645,7 +1644,7 @@ class MealsTab(QWidget):
             br = dr + 1
             bal_items, summary = _calc_balance(tt, self.daily_targets, nk)
             self.detail.setSpan(br, 0, 1, 2)
-            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_UNDER
+            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_OVER
             self.detail.setItem(br, 0, _make_balance_item(summary, sc, True))
             for c, key in enumerate(nk):
                 if key in bal_items:
@@ -1870,7 +1869,7 @@ class MenusTab(QWidget):
             br = dr + 1
             bal_items, summary = _calc_balance(tt, self.daily_targets, nk)
             self.detail.setSpan(br, 0, 1, 3)
-            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_UNDER
+            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_OVER
             self.detail.setItem(br, 0, _make_balance_item(summary, sc, True))
             for c, key in enumerate(nk):
                 if key in bal_items:
