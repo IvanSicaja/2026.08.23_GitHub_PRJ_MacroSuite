@@ -1227,6 +1227,10 @@ class ProfileDialog(QDialog):
 
 
 C_DAILY_BG = "#1a2e3a"
+C_DIFF_BG  = "#1e1e22"
+C_DIFF_OVER  = QColor("#ff5555")   # ▲ red — over target
+C_DIFF_UNDER = QColor("#ffbb33")   # ▼ amber — under target
+C_DIFF_OK    = QColor("#5599ff")   # ● blue — on target (±5%)
 
 
 def _make_daily_item(text, is_label=False):
@@ -1246,6 +1250,68 @@ def _make_daily_item(text, is_label=False):
 
 def _daily_desc(profile: str) -> str:
     return f"Daily Target  ·  {profile}" if profile else "Daily Target"
+
+
+def _calc_balance(totals: Dict[str, float], targets: Dict[str, float],
+                  nutr_keys: List[str]) -> Tuple[Dict[str, Tuple[str, QColor]], str]:
+    """Compare totals vs daily targets. Returns {key: (display_text, color)} and summary."""
+    items = {}
+    deviations = []  # (abs_pct, key, direction)
+
+    for key in nutr_keys:
+        total = totals.get(key, 0)
+        target = targets.get(key, 0)
+        if target <= 0:
+            items[key] = ("—", C_DIFF_OK)
+            continue
+        diff = total - target
+        pct = (diff / target) * 100
+        if pct > 5:
+            items[key] = (f"▲ +{abs(diff):.0f}", C_DIFF_OVER)
+            deviations.append((abs(pct), key, "over"))
+        elif pct < -5:
+            items[key] = (f"▼ −{abs(diff):.0f}", C_DIFF_UNDER)
+            deviations.append((abs(pct), key, "under"))
+        else:
+            items[key] = (f"● {diff:+.0f}", C_DIFF_OK)
+
+    # Build summary from top 3 deviations (skip duplicate energy)
+    if not deviations:
+        summary = "✓ Perfectly balanced meal"
+    else:
+        deviations.sort(reverse=True)
+        label_map = dict(NUTRITION_FIELDS)
+        seen_energy = False
+        parts = []
+        for pct_val, key, direction in deviations:
+            if len(parts) >= 3:
+                break
+            if key in ("energy_kj", "energy_kcal"):
+                if seen_energy:
+                    continue
+                seen_energy = True
+                label = "Energy"
+            else:
+                label = label_map.get(key, key).split(" (")[0]
+            arrow = "▲" if direction == "over" else "▼"
+            word = "High" if direction == "over" else "Low"
+            parts.append(f"{arrow} {word} {label}")
+        summary = "  ·  ".join(parts)
+
+    return items, summary
+
+
+def _make_balance_item(text: str, color: QColor, is_label: bool = False):
+    """Create a styled item for the balance/difference row."""
+    item = QTableWidgetItem(text)
+    item.setFlags(Qt.ItemIsEnabled)
+    item.setBackground(QColor(C_DIFF_BG))
+    item.setForeground(color)
+    f = item.font()
+    f.setBold(True)
+    item.setFont(f)
+    item.setTextAlignment((Qt.AlignLeft if is_label else Qt.AlignRight) | Qt.AlignVCenter)
+    return item
 
 
 def _ensure_col_width_for_text(table: QTableWidget, text: str, span_cols: list, padding: int = 50):
@@ -1567,15 +1633,24 @@ class MealsTab(QWidget):
         for c, key in enumerate(nk):
             self.detail.setItem(n+1, 2 + c, _make_per100_item(_fmt(p[key])))
 
-        # ── DAILY TARGET (last row) ──
+        # ── DAILY TARGET + BALANCE rows ──
         if self.daily_targets:
             dr = n + 2
-            self.detail.setRowCount(dr + 1)
+            self.detail.setRowCount(dr + 2)
             self.detail.setSpan(dr, 0, 1, 2)
             self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1])
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 2 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+
+            br = dr + 1
+            bal_items, summary = _calc_balance(tt, self.daily_targets, nk)
+            self.detail.setSpan(br, 0, 1, 2)
+            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_UNDER
+            self.detail.setItem(br, 0, _make_balance_item(summary, sc, True))
+            for c, key in enumerate(nk):
+                if key in bal_items:
+                    txt, clr = bal_items[key]
+                    self.detail.setItem(br, 2 + c, _make_balance_item(txt, clr))
 
         self.detail.resizeColumnsToContents()
         if self.daily_targets:
@@ -1783,15 +1858,24 @@ class MenusTab(QWidget):
         for c, key in enumerate(nk):
             self.detail.setItem(ni+1, 3 + c, _make_per100_item(_fmt(p[key])))
 
-        # ── DAILY TARGET (last row) ──
+        # ── DAILY TARGET + BALANCE rows ──
         if self.daily_targets:
             dr = ni + 2
-            self.detail.setRowCount(dr + 1)
+            self.detail.setRowCount(dr + 2)
             self.detail.setSpan(dr, 0, 1, 3)
             self.detail.setItem(dr, 0, _make_daily_item(_daily_desc(self.daily_profile), True))
-            _ensure_col_width_for_text(self.detail, _daily_desc(self.daily_profile), [0, 1, 2])
             for c, key in enumerate(nk):
                 self.detail.setItem(dr, 3 + c, _make_daily_item(_fmt(self.daily_targets.get(key, 0))))
+
+            br = dr + 1
+            bal_items, summary = _calc_balance(tt, self.daily_targets, nk)
+            self.detail.setSpan(br, 0, 1, 3)
+            sc = C_DIFF_OK if "✓" in summary else C_DIFF_OVER if "▲" in summary.split("·")[0] else C_DIFF_UNDER
+            self.detail.setItem(br, 0, _make_balance_item(summary, sc, True))
+            for c, key in enumerate(nk):
+                if key in bal_items:
+                    txt, clr = bal_items[key]
+                    self.detail.setItem(br, 3 + c, _make_balance_item(txt, clr))
 
         self.detail.resizeColumnsToContents()
         if self.daily_targets:
